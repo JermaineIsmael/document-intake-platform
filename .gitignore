@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.vs/
+.vscode/
+*.user
+**/appsettings.Local.json
+**/local.settings.json
+infra/**/*.json
+.env
+.azurite/
+TestResults/
