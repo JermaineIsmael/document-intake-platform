@@ -26,18 +26,66 @@ param apiImage string = 'mcr.microsoft.com/dotnet/samples:aspnetapp'
 @description('Keep true until the Function code is published and indexed; false creates the Event Grid subscription.')
 param bootstrapExtractor bool = true
 
+@description('Region for Azure OpenAI. Must offer text-embedding-3-small for the chosen SKU; verify with az cognitiveservices model list -l <region>.')
+param openAiLocation string = location
+
+@description('Embedding deployment SKU. Standard keeps processing in openAiLocation; GlobalStandard has broader availability.')
+@allowed([
+  'Standard'
+  'GlobalStandard'
+  'DataZoneStandard'
+])
+param embeddingSkuName string = 'Standard'
+
+@description('Embedding deployment capacity in thousands of tokens per minute; must fit your subscription quota.')
+@minValue(1)
+param embeddingCapacity int = 30
+
+@description('Display name of the Entra security group that administers Azure SQL (there is no SQL login).')
+@minLength(1)
+param sqlAdminGroupName string
+
+@description('Object ID (GUID) of the Entra security group that administers Azure SQL.')
+@minLength(36)
+@maxLength(36)
+param sqlAdminGroupObjectId string
+
+// LOCAL DEVELOPMENT PLACEHOLDER: in Sprint 3 the worker runs on a developer machine, so this is your
+// own Entra user object ID (az ad signed-in-user show --query id -o tsv). In Sprint 4 these worker
+// role assignments must be redone against the worker Container App's system-assigned managed identity.
+@description('Object ID of the identity that runs DocIntake.Worker. Sprint 3: your own Entra user object ID (local dev only).')
+@minLength(36)
+@maxLength(36)
+param workerPrincipalId string
+
+@description('Principal type of workerPrincipalId. User for local development; ServicePrincipal once a managed identity runs the worker.')
+@allowed([
+  'User'
+  'ServicePrincipal'
+])
+param workerPrincipalType string = 'User'
+
 var suffix = uniqueString(resourceGroup().id, env)
 var prefix = 'di-${env}-${suffix}'
 var apiName = '${prefix}-api'
 var extractorName = 'di${env}${suffix}extractor'
 var serviceBusNamespaceName = '${prefix}-sb'
 var documentIntelligenceName = 'di${env}${suffix}di'
+var searchName = '${prefix}-search'
+var openAiName = 'di${env}${suffix}oai'
+var embeddingDeploymentName = 'text-embedding-3-small'
+var sqlServerName = '${prefix}-sql'
+var sqlDatabaseName = 'docintake'
 var blobContributorRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
 var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 var telemetryPublisherRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')
 var storageBlobDataOwnerRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
 var serviceBusDataSenderRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '69a216fc-b8fb-44d8-bc22-1f3c2cd27a39')
 var cognitiveServicesUserRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'a97b65f3-24c7-4388-baec-2e87135dc908')
+var searchIndexDataContributorRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '8ebe5a00-799e-43f5-93ac-243d3dce84a7')
+var searchServiceContributorRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7ca78c08-252a-4471-8644-bb5ff32d4ba0')
+var cognitiveServicesOpenAiUserRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')
+var serviceBusDataReceiverRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0')
 
 resource serviceBus 'Microsoft.ServiceBus/namespaces@2024-01-01' = {
   name: serviceBusNamespaceName
@@ -77,6 +125,85 @@ resource documentIntelligence 'Microsoft.CognitiveServices/accounts@2026-09-01' 
     customSubDomainName: documentIntelligenceName
     disableLocalAuth: true
     publicNetworkAccess: 'Enabled'
+  }
+}
+
+// Sprint 3: roles-only data plane. disableLocalAuth: true rejects admin/query keys; authOptions is the
+// keys-plus-AAD setting (aadOrApiKey/apiKeyOnly) and must be omitted when local auth is disabled.
+resource search 'Microsoft.Search/searchServices@2025-05-01' = {
+  name: searchName
+  location: location
+  sku: {
+    name: 'basic'
+  }
+  properties: {
+    replicaCount: 1
+    partitionCount: 1
+    hostingMode: 'Default'
+    disableLocalAuth: true
+    publicNetworkAccess: 'enabled'
+  }
+}
+
+resource openAi 'Microsoft.CognitiveServices/accounts@2026-09-01' = {
+  name: openAiName
+  location: openAiLocation
+  kind: 'OpenAI'
+  sku: {
+    name: 'S0'
+  }
+  properties: {
+    customSubDomainName: openAiName
+    disableLocalAuth: true
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+// Embeddings only in Sprint 3; the chat model deployment is added in Sprint 4.
+// text-embedding-3-small v1 returns 1536 dimensions by default, matching IndexSchema.EmbeddingDimensions.
+resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2026-09-01' = {
+  parent: openAi
+  name: embeddingDeploymentName
+  sku: {
+    name: embeddingSkuName
+    capacity: embeddingCapacity
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: 'text-embedding-3-small'
+      version: '1'
+    }
+  }
+}
+
+// IMPORTANT: Entra-only authentication means this server has NO SQL admin login or password.
+// The deployer must have (or create) an Entra security group, pass its name and object ID, and be a
+// member of it to connect as admin and run sql/schema.sql.
+resource sqlServer 'Microsoft.Sql/servers@2025-01-01' = {
+  name: sqlServerName
+  location: location
+  properties: {
+    minimalTlsVersion: '1.2'
+    publicNetworkAccess: 'Enabled'
+    administrators: {
+      administratorType: 'ActiveDirectory'
+      azureADOnlyAuthentication: true
+      login: sqlAdminGroupName
+      sid: sqlAdminGroupObjectId
+      principalType: 'Group'
+      tenantId: tenant().tenantId
+    }
+  }
+}
+
+resource sqlDatabase 'Microsoft.Sql/servers/databases@2025-01-01' = {
+  parent: sqlServer
+  name: sqlDatabaseName
+  location: location
+  sku: {
+    name: 'Basic'
+    tier: 'Basic'
   }
 }
 
@@ -412,9 +539,61 @@ resource eventGridDeadLetterRole 'Microsoft.Authorization/roleAssignments@2022-0
   }
 }
 
+// Sprint 3 worker roles. SPRINT 4 TODO: workerPrincipalId is a local-development placeholder (your
+// own user). When the worker is deployed as a Container App, redo these four assignments against its
+// system-assigned managed identity (principalType ServicePrincipal) and remove the developer grants.
+// Search Service Contributor is needed because the worker creates/updates the index schema; with
+// disableLocalAuth on Search, its key-management actions grant no data access.
+// SQL access is not Azure RBAC: it comes from Entra admin-group membership (local) or the contained
+// database user created by sql/schema.sql (Sprint 4 managed identity).
+resource workerSearchIndexDataContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(search.id, workerPrincipalId, searchIndexDataContributorRoleId)
+  scope: search
+  properties: {
+    roleDefinitionId: searchIndexDataContributorRoleId
+    principalId: workerPrincipalId
+    principalType: workerPrincipalType
+  }
+}
+
+resource workerSearchServiceContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(search.id, workerPrincipalId, searchServiceContributorRoleId)
+  scope: search
+  properties: {
+    roleDefinitionId: searchServiceContributorRoleId
+    principalId: workerPrincipalId
+    principalType: workerPrincipalType
+  }
+}
+
+resource workerOpenAiUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(openAi.id, workerPrincipalId, cognitiveServicesOpenAiUserRoleId)
+  scope: openAi
+  properties: {
+    roleDefinitionId: cognitiveServicesOpenAiUserRoleId
+    principalId: workerPrincipalId
+    principalType: workerPrincipalType
+  }
+}
+
+resource workerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(serviceBus.id, workerPrincipalId, serviceBusDataReceiverRoleId)
+  scope: serviceBus
+  properties: {
+    roleDefinitionId: serviceBusDataReceiverRoleId
+    principalId: workerPrincipalId
+    principalType: workerPrincipalType
+  }
+}
+
 output apiFqdn string = api.outputs.fqdn
 output acrName string = registry.name
 output storageName string = storage.name
 output serviceBusNamespace string = serviceBus.name
 output documentIntelligenceEndpoint string = documentIntelligence.properties.endpoint
 output extractorName string = extractor.name
+output searchEndpoint string = 'https://${search.name}.search.windows.net'
+output openAiEndpoint string = openAi.properties.endpoint
+output embeddingDeploymentName string = embeddingDeployment.name
+output sqlServerFqdn string = sqlServer.properties.fullyQualifiedDomainName
+output sqlDatabaseName string = sqlDatabase.name

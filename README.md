@@ -11,12 +11,15 @@ consumer, AI Search, SQL, or `/ask` endpoint.
 - [DocIntake.Shared](src/DocIntake.Shared): shared response models.
 - [DocIntake.Api](src/DocIntake.Api): ASP.NET Core minimal API.
 - [DocIntake.Extractor](src/DocIntake.Extractor): .NET 8 isolated Azure Function.
+- [DocIntake.Worker](src/DocIntake.Worker): .NET 8 worker service for chunking, embedding, and indexing (Sprint 3).
 - [DocIntake.Tests](tests/DocIntake.Tests): xUnit and FluentAssertions integration tests.
 - [Infrastructure](infra/main.bicep): resource-group-scoped Azure deployment.
+- [SQL schema](sql/schema.sql): one-time Entra-admin script for metadata tables and the worker user.
 - [Container App module](infra/modules/containerApp.bicep): reusable managed-identity container app.
 
 The existing Git repository is used as the solution root. Projects reference
-Shared from Api; both Api and Shared from Tests; and Shared from Extractor.
+Shared from Api, Extractor, and Worker; Tests reference Api, Extractor, Worker,
+and Shared.
 The `DocumentMessage` contract was not present in the Sprint 1 checkout. With
 approval to infer the missing Sprint 2 contract, Extractor reuses the new
 shared record defined in [DocumentMessage.cs](src/DocIntake.Shared/DocumentMessage.cs).
@@ -821,3 +824,238 @@ traces and dead-letter delivery must be confirmed against deployed resources;
 compilation and automated tests do not verify Azure role propagation,
 Document Intelligence availability, Event Grid delivery, queue contents, or
 live telemetry ingestion.
+
+## Sprint 3: search, embeddings, and metadata foundation
+
+Sprint 3 adds `DocIntake.Worker` (a .NET 8 worker service, run locally this
+sprint) plus shared chunking in
+[TextChunker.cs](src/DocIntake.Shared/TextChunker.cs). The worker creates the
+`document-chunks` Azure AI Search index idempotently through
+[IndexSchema.cs](src/DocIntake.Worker/IndexSchema.cs).
+
+New resources in [infra/main.bicep](infra/main.bicep):
+
+| Resource | Configuration |
+| --- | --- |
+| Azure AI Search | `basic`, 1 replica, 1 partition, `disableLocalAuth: true` (Entra ID roles only; no admin/query keys) |
+| Azure OpenAI | `S0`, `disableLocalAuth: true`, custom subdomain, one `text-embedding-3-small` (version `1`) deployment; no chat model yet |
+| Azure SQL | Entra-only authentication (no SQL login/password), `Basic` database `docintake` |
+
+The index vector field uses 1536 dimensions, the default (and maximum) output
+of `text-embedding-3-small`. That model accepts a smaller `dimensions` request
+option; do not set it unless `IndexSchema.EmbeddingDimensions` changes too.
+
+### Deploy prerequisites
+
+- An Entra **security group** to administer SQL, with you as a member. Set
+  `sqlAdminGroupName` and `sqlAdminGroupObjectId` in
+  [infra/main.bicepparam](infra/main.bicepparam):
+
+  ```powershell
+  az ad group show --group "<group name>" --query id -o tsv
+  ```
+
+- `text-embedding-3-small` availability and quota in `openAiLocation`
+  (defaults to the resource-group region) for `embeddingSkuName`
+  (default `Standard`) and `embeddingCapacity` (default 30K TPM):
+
+  ```powershell
+  az cognitiveservices model list -l <region> `
+    --query "[?kind=='OpenAI' && model.name=='text-embedding-3-small'].{version:model.version,skus:model.skus[].name}"
+  az cognitiveservices usage list -l <region> -o table
+  ```
+
+  If `Standard` is unavailable in your region, set `embeddingSkuName` to
+  `GlobalStandard` or choose another `openAiLocation`.
+
+- Your own Entra user object ID as `workerPrincipalId` (local development
+  placeholder; Sprint 4 replaces it with the worker Container App identity).
+  It receives Search Index Data Contributor, Search Service Contributor,
+  Cognitive Services OpenAI User, and Azure Service Bus Data Receiver:
+
+  ```powershell
+  az ad signed-in-user show --query id -o tsv
+  ```
+
+Deploy with the same `az deployment group create` command used for previous
+sprints, keeping the existing API image and `bootstrapExtractor` values.
+
+### Create the SQL schema
+
+The SQL server has no firewall rules by default and has no SQL logins, so
+connect with Entra authentication as a member of the admin group. Allow your
+client IP, then run [sql/schema.sql](sql/schema.sql).
+
+Use the modern Go-based `sqlcmd` (`winget install sqlcmd`), which supports
+Entra authentication methods. The legacy ODBC `sqlcmd` that ships with SQL
+Server tools does **not** support `--authentication-method`; with it, use
+`-G` plus a separately installed ODBC driver, or use a GUI client instead.
+
+```powershell
+$deployment = '<deployment name>'
+$sqlServer = az deployment group show --name $deployment `
+  --resource-group $resourceGroup --query properties.outputs.sqlServerFqdn.value -o tsv
+$myIp = (Invoke-RestMethod https://api.ipify.org)
+az sql server firewall-rule create --resource-group $resourceGroup `
+  --server $sqlServer.Split('.')[0] --name local-dev `
+  --start-ip-address $myIp --end-ip-address $myIp
+
+# Uses your az login / Visual Studio identity (no prompt)...
+sqlcmd -S $sqlServer -d docintake --authentication-method ActiveDirectoryDefault `
+  -i sql\schema.sql
+# ...or a browser sign-in:
+sqlcmd -S $sqlServer -d docintake --authentication-method ActiveDirectoryInteractive `
+  -U <your UPN> -i sql\schema.sql
+```
+
+GUI alternative: SQL Server Management Studio or the VS Code **SQL Server
+(mssql)** extension, connecting to `$sqlServer`, database `docintake`, with
+**Microsoft Entra ID - Universal with MFA** authentication, then running the
+script. (Azure Data Studio was retired; use SSMS or the VS Code extension.)
+
+Before running the script, replace `<worker-identity-name>` or remove the
+worker-user section. In Sprint 3 the worker runs under your own Entra identity
+(admin-group members already have access); in Sprint 4 the placeholder becomes
+the worker Container App's managed identity name.
+
+## Sprint 3: Running the worker locally
+
+The worker consumes `extracted-documents`, splits `content` into 800-character
+chunks with 100 characters of overlap, embeds them in batches, uploads them to
+the `document-chunks` index, and upserts one row per document into
+`dbo.Documents`.
+
+There is **no fully local option** this sprint, unlike Sprint 1's Azurite
+setup: Azure AI Search and Azure OpenAI have no practical local emulators,
+and the worker's purpose is to exercise the real Entra-authenticated Service
+Bus, Search, OpenAI, and SQL resources. Run the worker on your machine against
+the deployed resources. `DefaultAzureCredential` uses your `az login` (or
+Visual Studio) identity, which is `workerPrincipalId` in Bicep and an SQL
+admin-group member.
+
+### Configure and run
+
+Complete the Sprint 3 deploy and schema steps above, then:
+
+```powershell
+az login --tenant <tenant-id>
+$deployment = '<deployment name>'
+function Get-Output($name) {
+  az deployment group show --name $deployment --resource-group $resourceGroup `
+    --query "properties.outputs.$name.value" -o tsv
+}
+$env:ServiceBus__Namespace = "$(Get-Output serviceBusNamespace).servicebus.windows.net"
+$env:Search__Endpoint = Get-Output searchEndpoint
+$env:OpenAI__Endpoint = Get-Output openAiEndpoint
+$env:OpenAI__EmbeddingDeployment = Get-Output embeddingDeploymentName
+$env:Sql__Server = Get-Output sqlServerFqdn
+$env:Sql__Database = Get-Output sqlDatabaseName
+# Optional: send worker traces/logs to Application Insights.
+$env:APPLICATIONINSIGHTS_CONNECTION_STRING = az monitor app-insights component show `
+  --resource-group $resourceGroup --query "[0].connectionString" -o tsv
+
+dotnet run --project src\DocIntake.Worker
+```
+
+Role assignments can take a few minutes to propagate after deployment; 403
+errors right after deploying usually clear on their own. Expected startup log
+lines: `Search index document-chunks is ready` and `Processing queue
+extracted-documents with MaxConcurrentCalls 4`. Restarting the worker is safe:
+the index is created with `CreateOrUpdateIndexAsync` and existing documents
+are kept.
+
+Settings (all overridable with `Section__Key` environment variables, see
+[appsettings.json](src/DocIntake.Worker/appsettings.json)):
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `ServiceBus__QueueName` | `extracted-documents` | |
+| `ServiceBus__MaxConcurrentCalls` | `4` | Tuning knob: throughput vs. OpenAI TPM (429s) and SQL/Search concurrency |
+| `ServiceBus__MaxDeliveryCount` | `5` | Must match the queue's `maxDeliveryCount` |
+| `ServiceBus__MaxAutoLockRenewalDuration` | `00:10:00` | Renews the 1-minute message lock while a document is processed |
+| `Indexing__EmbeddingBatchSize` | `100` | Inputs per embeddings request |
+| `Indexing__SearchUploadBatchSize` | `250` | Documents per Search upload (service limit 1000 / 16 MB) |
+
+### Message handling and redelivery
+
+- Success: the message is completed.
+- Failure (OpenAI, Search, or SQL): logged with the document ID and delivery
+  count, then abandoned for redelivery. On delivery 5 it is dead-lettered with
+  reason `IndexingFailed` and the exception message.
+- A body that can never succeed (invalid JSON, missing `documentId`, or a
+  `sourceUrl` that is not an absolute HTTPS URL up to 2048 characters) is
+  dead-lettered immediately with reason `InvalidDocumentMessage`.
+- Transport errors (connection, authorization, lock renewal) are logged by the
+  processor error handler; the processor keeps reconnecting.
+
+Redelivery is safe: chunk IDs are deterministic (`{documentId}-{chunkIndex}`),
+so re-uploading overwrites the same Search documents, and the SQL write is an
+`UPDLOCK, SERIALIZABLE` update-then-insert keyed on `Id`. If a lock is lost
+despite renewal, the duplicate processing converges on the same final state.
+
+### End-to-end verification
+
+1. Start the worker as above and leave it running.
+2. Upload a document with Sprint 1's API (see
+   [Verify the deployed API](#5-verify-the-deployed-api-blobs-and-roles)) and
+   note the `documentId` in the 202 response:
+
+   ```powershell
+   $response = curl.exe -s -H "Authorization: Bearer $accessToken" `
+     -F "file=@C:\documents\sample.pdf" "https://${apiFqdn}/documents" | ConvertFrom-Json
+   $documentId = $response.documentId
+   ```
+
+3. Within about 30 seconds Sprint 2's extractor queues the message; the worker
+   then logs `Indexed <documentId> with <n> chunks`.
+4. Query AI Search for that document's chunks. Your identity has Search Index
+   Data Contributor; Search does not accept keys (`disableLocalAuth`):
+
+   ```powershell
+   $storageName = Get-Output storageName
+   $sourceUrl = az storage blob list --account-name $storageName --container-name documents `
+     --prefix "$documentId/" --auth-mode login --query "[0].name" -o tsv |
+     ForEach-Object { "https://$storageName.blob.core.windows.net/documents/$_" }
+   $searchToken = az account get-access-token --resource https://search.azure.com `
+     --query accessToken -o tsv
+   $body = @{ search = '*'; filter = "source eq '$sourceUrl'"; count = $true; top = 0 } |
+     ConvertTo-Json
+   Invoke-RestMethod -Method Post -ContentType 'application/json' `
+     -Headers @{ Authorization = "Bearer $searchToken" } -Body $body `
+     -Uri "$(Get-Output searchEndpoint)/indexes/document-chunks/docs/search?api-version=2024-07-01" |
+     Select-Object '@odata.count'
+   ```
+
+   Listing blobs requires a Storage Blob Data Reader (or higher) role for your
+   user; alternatively copy `sourceUrl` from the queue message or the portal.
+   Blob names containing spaces or other reserved characters are URL-encoded
+   in `sourceUrl`; copy the exact value in that case. In the portal, use the
+   search service's **Search explorer** with the same filter.
+
+5. Query the metadata row; `ChunkCount` must equal `@odata.count`:
+
+   ```powershell
+   sqlcmd -S $sqlServer -d docintake --authentication-method ActiveDirectoryDefault `
+     -Q "SELECT Id, SourceUrl, ChunkCount, IndexedAt FROM dbo.Documents WHERE Id = '$documentId'"
+   ```
+
+**Redelivery check.** Stop the worker and upload another document. In the
+portal, open the namespace's **Service Bus Explorer** on `extracted-documents`,
+choose **Receive** in **PeekLock** mode, and **Abandon** the message
+(`DeliveryCount` increases). Start the worker; it processes the redelivered
+message. Repeat steps 4-5: the Search count equals `ChunkCount`, with exactly
+one `dbo.Documents` row. Running the same message through the worker twice
+leaves the same result.
+
+**Large document check.** Upload a `.docx` or text PDF with at least 35,100
+characters of text (50+ chunks) but well under ~200,000 characters (the
+Sprint 2 extractor rejects messages over the 256 KiB Service Bus limit). For
+example, with `pip install python-docx`:
+
+```powershell
+python -c "import docx; d=docx.Document(); [d.add_paragraph(f'Paragraph {i}: ' + 'The quick brown fox jumps over the lazy dog. ' * 12) for i in range(80)]; d.save('large.docx')"
+```
+
+Verify steps 3-5 report the same 50+ chunk count. If processing exceeds the
+queue's 1-minute lock, the worker's automatic lock renewal keeps the message
+locked (no `MessageLockLost` errors in the logs and `DeliveryCount` stays 1).
