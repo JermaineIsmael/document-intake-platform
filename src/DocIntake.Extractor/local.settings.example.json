@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": "",
+    "Storage__BlobEndpoint": "https://<storage-account>.blob.core.windows.net",
+    "Storage__ContainerName": "documents",
+    "DocIntel__Endpoint": "https://<document-intelligence-resource>.cognitiveservices.azure.com/",
+    "ServiceBus__Namespace": "<service-bus-namespace>.servicebus.windows.net",
+    "ServiceBus__QueueName": "extracted-documents"
+  }
+}

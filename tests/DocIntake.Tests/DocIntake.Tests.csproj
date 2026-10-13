@@ -21,6 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\DocIntake.Extractor\DocIntake.Extractor.csproj" />
     <ProjectReference Include="..\..\src\DocIntake.Api\DocIntake.Api.csproj" />
     <ProjectReference Include="..\..\src\DocIntake.Shared\DocIntake.Shared.csproj" />
   </ItemGroup>

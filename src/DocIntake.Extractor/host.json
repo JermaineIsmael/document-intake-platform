@@ -1,0 +1,25 @@
+{
+  "version": "2.0",
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true,
+        "maxTelemetryItemsPerSecond": 20,
+        "excludedTypes": "Request"
+      },
+      "enableLiveMetricsFilters": true
+    },
+    "logLevel": {
+      "default": "Information",
+      "Host.Results": "Information",
+      "Function.ExtractDocument": "Information",
+      "Host.Aggregator": "Information"
+    }
+  },
+  "extensions": {
+    "eventGrid": {
+      "maxBatchSize": 1,
+      "maxWaitTime": "00:00:30"
+    }
+  }
+}

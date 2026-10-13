@@ -1,21 +1,25 @@
-# DocIntake - Sprint 1 foundation
+# DocIntake - document intake platform
 
-This repository implements Tasks 1-10: a .NET 8 minimal API foundation,
-development configuration, authentication, telemetry, containerization, and
-Azure infrastructure, anonymous health checks, and validated document uploads
-stored in Blob Storage.
-There is no Event Grid, Service Bus, Functions, worker, AI Search, or SQL.
+This repository contains the Sprint 1 API foundation and the Sprint 2
+blob-to-extraction ingestion pipeline: authenticated uploads, Azure Blob
+Storage, an Event Grid-triggered .NET 8 isolated Function, Azure AI Document
+Intelligence, Application Insights, and a Service Bus queue. There is no queue
+consumer, AI Search, SQL, or `/ask` endpoint.
 
 ## Projects
 
 - [DocIntake.Shared](src/DocIntake.Shared): shared response models.
 - [DocIntake.Api](src/DocIntake.Api): ASP.NET Core minimal API.
+- [DocIntake.Extractor](src/DocIntake.Extractor): .NET 8 isolated Azure Function.
 - [DocIntake.Tests](tests/DocIntake.Tests): xUnit and FluentAssertions integration tests.
 - [Infrastructure](infra/main.bicep): resource-group-scoped Azure deployment.
 - [Container App module](infra/modules/containerApp.bicep): reusable managed-identity container app.
 
 The existing Git repository is used as the solution root. Projects reference
-Shared from Api, and both Api and Shared from Tests.
+Shared from Api; both Api and Shared from Tests; and Shared from Extractor.
+The `DocumentMessage` contract was not present in the Sprint 1 checkout. With
+approval to infer the missing Sprint 2 contract, Extractor reuses the new
+shared record defined in [DocumentMessage.cs](src/DocIntake.Shared/DocumentMessage.cs).
 
 ## Local development
 
@@ -26,6 +30,9 @@ Prerequisites:
 - Azurite, either its Docker image below or the npm package (requires Node.js).
 - Azure CLI 2.53.0 or newer and Bicep CLI 0.22 or newer; current releases are
   recommended for the resource API versions used here.
+- Azure Functions Core Tools v4 (`winget install Microsoft.Azure.FunctionsCoreTools`
+  or `npm install --global azure-functions-core-tools@4 --unsafe-perm true`) to
+  run the extractor locally.
 - An Azure subscription and Entra API registration for deployment.
 
 Clone the repository and run all following commands from its root:
@@ -42,14 +49,17 @@ From the repository root, start Azurite **before** starting the API:
 
 ```powershell
 docker run --rm --name docintake-azurite `
-  -p 10000:10000 `
+  -p 10000:10000 -p 10001:10001 -p 10002:10002 `
   mcr.microsoft.com/azure-storage/azurite `
-  azurite-blob --blobHost 0.0.0.0 --location /data
+  azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 `
+  --tableHost 0.0.0.0 --location /data
 ```
 
 This uses ephemeral emulator data. Alternatively, install Azurite with
 `npm install --global azurite`, then run
-`azurite-blob --blobHost 127.0.0.1 --location .azurite` in a separate terminal.
+`azurite --blobHost 127.0.0.1 --queueHost 127.0.0.1 --tableHost 127.0.0.1
+--location .azurite` in a separate terminal. All three endpoints are needed
+for the Functions host's local runtime storage.
 
 ```powershell
 dotnet build --warnaserror
@@ -61,6 +71,37 @@ The HTTP launch profile sets `ASPNETCORE_ENVIRONMENT=Development` and listens
 on `http://localhost:5067`. [Development settings](src/DocIntake.Api/appsettings.Development.json)
 set `Storage:BlobEndpoint` to `http://127.0.0.1:10000/devstoreaccount1` and
 `Development:BypassAuth` to `true`.
+
+Azurite does not emit Azure Event Grid events. For a complete end-to-end
+pipeline test, publish the Function to a development Function App and upload
+through its real Azure storage/Event Grid resources, as described below. This
+is more practical and representative than manually constructing an Event Grid
+webhook invocation. A local `func start` is still useful for debugging: use
+Azurite only for the Functions host's local bookkeeping and configure the Blob,
+Document Intelligence, and Service Bus endpoints to dev Azure resources. The
+developer's `DefaultAzureCredential` must have Blob Data Owner on the storage
+account, Cognitive Services User, and Service Bus Data Sender:
+
+```powershell
+az login --tenant '<tenant-id>'
+if (!(Test-Path src\DocIntake.Extractor\local.settings.json)) {
+    Copy-Item src\DocIntake.Extractor\local.settings.example.json `
+      src\DocIntake.Extractor\local.settings.json
+}
+# Edit DocIntel__Endpoint and ServiceBus__Namespace in local.settings.json.
+dotnet build src\DocIntake.Extractor\DocIntake.Extractor.csproj
+func start --script-root src\DocIntake.Extractor
+```
+
+The local settings file is intentionally gitignored. `UseDevelopmentStorage=true`
+is used only by the local Functions host to access Azurite. Set
+`Storage__BlobEndpoint` to the HTTPS endpoint of the dev storage account, and
+set the Document Intelligence endpoint and Service Bus namespace to deployed
+dev resources. `az login` supplies the local developer credential. There is no
+local Event Grid emulator in this workflow; uploading to Azurite alone does
+not trigger extraction. For an end-to-end test, publish to the dev Function
+App, whose host uses AzureWebJobsStorage and other services through its
+managed identity.
 
 ```powershell
 Invoke-RestMethod http://localhost:5067/
@@ -135,9 +176,10 @@ the validated PDF/DOCX Content-Type. Metadata contains `documentId` and
 requirement; use `Uri.UnescapeDataString` to recover the original filename.
 Each upload gets a new GUID and writes with an If-None-Match condition.
 
-`queued` is the required response status only: Sprint 1 does not publish to a
-queue or implement `GET /documents/{documentId}` or background processing.
-The Location identifies the document for later sprints.
+`queued` is the upload API's acceptance status; extraction and queue delivery
+happen asynchronously through the Sprint 2 pipeline described below. The API
+does not wait for Document Intelligence or Service Bus, and
+`GET /documents/{documentId}` is not implemented.
 
 ### Testing Entra authentication locally
 
@@ -191,15 +233,18 @@ Development; ordinary Azurite does not accept DefaultAzureCredential over HTTP.
 When `APPLICATIONINSIGHTS_CONNECTION_STRING` is configured, Azure Monitor
 OpenTelemetry reads that environment variable automatically (no connection
 string is passed in application code), collects API telemetry, and authenticates ingestion with
-`DefaultAzureCredential`. Application Insights local/key-based ingestion is
-disabled, and the app receives Monitoring Metrics Publisher on the component.
+`DefaultAzureCredential`. The API receives Monitoring Metrics Publisher on the
+component.
 **Approved exception to Definition of done item 11:** the API has three
 narrowly scoped roles, not two. Monitoring Metrics Publisher is required for
 identity-authenticated ingestion; it is not Contributor/Owner on the resource
 group or subscription. The other roles remain Storage Blob Data Contributor
 on the storage account and AcrPull on the registry.
 The Application Insights connection string identifies the telemetry endpoint;
-it is not a storage connection string or an account-key credential.
+it is not a storage connection string or an account-key credential. For the
+Function, App Insights local authentication remains enabled because the
+selected exact-three-role Function identity cannot also receive
+`Monitoring Metrics Publisher`.
 
 Telemetry export is not enabled locally without that setting. To export
 locally, use `az login`, configure the setting, and grant your developer identity
@@ -306,6 +351,21 @@ context.
 - A Consumption Container Apps managed environment linked to Log Analytics.
 - A system-assigned Container App, identity-based ACR pull, and the three RBAC
   assignments described above.
+- A Service Bus Standard namespace with local authentication disabled and the
+  `extracted-documents` queue (5 deliveries, 1-minute lock, expiry dead-letter,
+  10-minute duplicate detection).
+- An S0 FormRecognizer Azure AI Document Intelligence account with a custom
+  subdomain and local authentication disabled.
+- An Event Grid system topic on the private document storage account, with a
+  BlobCreated subscription to the extractor filtered to the `documents`
+  container and a managed-identity blob dead-letter destination.
+- A Linux Consumption (Y1) Function App running the built-in .NET 8 isolated
+  stack, with a separate shared-key-disabled host-storage account.
+- Extractor RBAC: Storage Blob Data Owner on the document/host storage account,
+  Service Bus Data Sender on the namespace, and Cognitive Services User on
+  Document Intelligence.
+- Event Grid system topic RBAC: Storage Blob Data Contributor on the storage
+  dead-letter container only, solely to write exhausted events.
 
 The container app module accepts name, location, environmentId, registryServer,
 image, external, minReplicas, maxReplicas, envVars, and secrets. `envVars` is an
@@ -313,7 +373,8 @@ array of `{ name, value }` or `{ name, secretRef }` objects. `secrets` is a secu
 object wrapping an array as `{ values: [{ name, value }] }` (empty by default),
 since ARM cannot represent a secure array parameter. The module outputs principalId and
 fqdn, serves HTTPS ingress on port 8080, and uses TCP startup/liveness/readiness
-probes. The main deployment outputs apiFqdn, acrName, and storageName.
+probes. The main deployment outputs apiFqdn, acrName, storageName,
+serviceBusNamespace, documentIntelligenceEndpoint, and extractorName.
 
 ### 1. Prepare
 
@@ -330,7 +391,8 @@ after selecting it, an administrator can register them with:
 ```powershell
 foreach ($provider in @('Microsoft.App', 'Microsoft.ContainerRegistry',
     'Microsoft.Storage', 'Microsoft.OperationalInsights', 'Microsoft.Insights',
-    'Microsoft.KeyVault')) {
+    'Microsoft.KeyVault', 'Microsoft.ServiceBus', 'Microsoft.CognitiveServices',
+    'Microsoft.EventGrid', 'Microsoft.Web')) {
     az provider register --namespace $provider --wait
     if ($LASTEXITCODE -ne 0) { throw "Provider registration failed: $provider" }
 }
@@ -549,3 +611,213 @@ Content-Type, metadata, and overwrite protection) using an in-process HTTP
 transport. A separate real Kestrel fixture verifies at-limit and over-limit
 Content-Length/chunked uploads with a configured 1 MiB limit. These tests do not
 require Azure or Azurite.
+
+## Sprint 2: blob-to-queue extraction pipeline
+
+The `DocIntake.Extractor` project targets `net8.0`, `OutputType=Exe`, Functions
+runtime v4, and the isolated worker model. It uses the current isolated-worker
+`ConfigureFunctionsWorkerDefaults()` host API plus
+`ConfigureFunctionsApplicationInsights()`. The SDKs use one injected
+`DefaultAzureCredential` for Blob Storage, Document Intelligence, and Service
+Bus; no Azure key or connection string is used for those clients.
+
+When a blob is created in the private `documents` container, the Event Grid
+system topic invokes `ExtractDocument`. The function validates the event's
+storage host and container, reads the document ID from the second-to-last blob
+path segment, downloads the blob with managed identity, and analyzes it with
+the `prebuilt-read` model. It sends JSON for the shared
+`DocumentMessage` to the `extracted-documents` queue. The queue message has
+camel-case `sourceUrl`, `documentId`, and `content` properties. Its
+`MessageId` is the document GUID; queue
+duplicate detection suppresses duplicate deliveries for ten minutes. The
+function does not log extracted text or document content.
+
+Service Bus Standard has a finite 256 KiB message limit. The function measures
+the serialized message against the sender's actual batch limit before sending;
+if the full extraction does not fit, it logs only the document ID and fails the
+Event Grid invocation (so it is not reported as queued). Event Grid retries
+failed delivery and eventually expires events per the configured retry policy;
+it does not route those failures to the Service Bus dead-letter queue. Large
+extractions therefore require a later design such as storing extracted text in
+Blob Storage and queueing a reference or splitting text into bounded chunks.
+
+The Event Grid subscription is filtered to `Microsoft.Storage.BlobCreated`
+events under `/blobServices/default/containers/documents/`, sends one event per
+delivery batch, and writes exhausted events into the private
+`eventgrid-deadletter` container using the Event Grid system topic's
+system-assigned identity. That identity has Storage Blob Data Contributor
+scoped to the dead-letter container for dead-letter writes; it is separate from
+the Function identity.
+
+The subscription is deliberately gated by `bootstrapExtractor`: Azure Function
+destinations reference a deployed function resource, so publish and verify the
+Function code (and confirm `ExtractDocument` is indexed) before setting
+`bootstrapExtractor=false` and deploying the subscription. The Bicep resource
+depends on the Function App settings and dead-letter resources, but ARM cannot
+order itself after a manual code publish; deployment steps below enforce that
+ordering. This avoids first-deployment endpoint-resolution failures.
+
+The Function uses the document Standard_LRS account as its host storage,
+configured by the identity-based `AzureWebJobsStorage__accountName` setting.
+Its system identity receives exactly three data-plane roles: Storage Blob Data
+Owner on that account (both document reads and host/lease blobs), Service Bus
+Data Sender on the namespace, and Cognitive Services User on Document
+Intelligence. The Function uses only an Event Grid trigger and no Storage Queue
+or Table bindings, so it does not need queue/table data roles. Event Grid has a
+separate system-assigned identity and Storage Blob Data Contributor on the
+storage account, only for its dead-letter writes.
+The Service Bus namespace is Standard and disables local authentication.
+Document Intelligence is S0/FormRecognizer, has a custom subdomain, and
+disables local authentication. The Function App uses the built-in Linux .NET
+isolated stack on a **Consumption (Y1) plan**, not a custom container or ACR
+pull. Per the selected exact-three-role constraint, Function telemetry uses the
+Application Insights connection string generated dynamically from the
+Application Insights resource; local-auth ingestion is enabled on that
+workspace-based component, and no `Monitoring Metrics Publisher` role is
+assigned to the Function identity. This resource-generated connection string
+identifies the telemetry component and is not a storage or Service Bus
+credential. The Event Grid and Service Bus namespaces use public Azure service
+endpoints; network/private-endpoint restrictions are not included in this
+sprint.
+
+### Deploy Sprint 2 from the existing Sprint 1 deployment
+
+The resource-group deployment uses the same
+[infra/main.bicepparam](infra/main.bicepparam). Keep valid Entra API values and
+the current API image (`bootstrap=false`, `apiImage=<current API image>`).
+Initially keep `bootstrapExtractor=true` so the Function App and its identity
+are created without the Event Grid subscription. First deploy the resources and
+managed-identity roles:
+
+```powershell
+az deployment group what-if --resource-group $resourceGroup `
+  --parameters infra\main.bicepparam
+
+az deployment group create --name docintake-sprint2-bootstrap `
+  --resource-group $resourceGroup `
+  --parameters infra\main.bicepparam
+
+$extractorName = az deployment group show --name docintake-sprint2-bootstrap `
+  --resource-group $resourceGroup --query properties.outputs.extractorName.value -o tsv
+```
+
+Deploy the .NET isolated Function code to the new Function App using Functions
+Core Tools. Run publish from the extractor project directory:
+
+```powershell
+Push-Location src\DocIntake.Extractor
+func azure functionapp publish $extractorName --dotnet-isolated
+Pop-Location
+
+$state = az functionapp show --name $extractorName --resource-group $resourceGroup `
+  --query state -o tsv
+if ($LASTEXITCODE -ne 0 -or $state -ne 'Running') {
+    throw "Extractor Function App is not running (state: $state)."
+}
+az functionapp function list --name $extractorName --resource-group $resourceGroup `
+  --query "[].name" -o tsv
+```
+
+Wait for `ExtractDocument` to appear before enabling delivery. In
+`infra/main.bicepparam`, set `bootstrapExtractor = false` while preserving the
+API image value, then create the final deployment:
+
+```powershell
+az deployment group what-if --resource-group $resourceGroup `
+  --parameters infra\main.bicepparam
+az deployment group create --name docintake-sprint2-enable-events `
+  --resource-group $resourceGroup `
+  --parameters infra\main.bicepparam
+```
+
+This final deployment creates the Event Grid `BlobCreated` subscription and
+resolves its Azure Function destination. If Event Grid cannot resolve
+`ExtractDocument`, leave `bootstrapExtractor=true`, verify function indexing
+and managed-identity role assignments, wait for the host to become ready, and
+retry with `bootstrapExtractor=false`. Retain the real API image and
+`bootstrap=false` on every full infrastructure redeployment.
+
+### Verify extraction and queue delivery
+
+Use the HTTPS upload commands in deployment verification. After a successful
+202 response, wait for asynchronous extraction. Function execution logs can be
+checked with:
+
+```powershell
+az functionapp log tail --name $extractorName --resource-group $resourceGroup
+```
+
+The `extracted-documents` queue should receive one `DocumentMessage` for each
+document ID, with `MessageId` equal to that ID. Event Grid may deliver retries;
+Service Bus duplicate detection makes repeated sends with the same ID
+idempotent inside its ten-minute window. The queue is intentionally not
+consumed in Sprint 2. Use an approved Service Bus Explorer authenticated with
+Entra, or grant your operator Service Bus Data Receiver at the queue to inspect
+and peek messages. Do not grant the extractor receive permissions. Confirm
+message `content` contains recognized document text, `sourceUrl` and
+`documentId` match the uploaded blob, and no text or blob contents appear in
+Function logs.
+
+The automated smoke-test script uploads a sample PDF and polls the active
+Service Bus queue count for up to two minutes. It needs PowerShell 7, Azure CLI
+logged in with permission to read queue properties, and a valid API bearer
+token in `DOCINTAKE_API_TOKEN`:
+
+```powershell
+$env:DOCINTAKE_API_TOKEN = '<short-lived API access token>'
+./scripts/test-extraction-pipeline.ps1 `
+  -ApiBaseUrl 'https://<api-fqdn>' `
+  -SamplePdf 'C:\documents\sample.pdf' `
+  -ResourceGroup $resourceGroup `
+  -ServiceBusNamespace '<service-bus-namespace>'
+```
+
+The script compares the active message count before and after upload. This
+detects a new queued message when there is no concurrent sender/receiver; it
+does not peek message bodies or prove the new message contains the expected
+document ID. Use an Entra-authenticated Service Bus Explorer to validate
+`documentId`, `sourceUrl`, and non-empty `content` in the message itself.
+
+### Monitoring
+
+Run these in the Application Insights **Logs** blade. Successful extraction
+traces should appear in the last hour:
+
+```kusto
+traces
+| where timestamp > ago(1h)
+| where message startswith "Extracted "
+| where message contains "and queued for indexing"
+| project timestamp, message, operation_Id
+| order by timestamp desc
+```
+
+Failures log the document ID and blob URL, include the exception, and are
+re-thrown for Event Grid retries. Query them with:
+
+```kusto
+traces
+| where timestamp > ago(1h)
+| where severityLevel >= 3
+| where message startswith "Failed to extract and queue document "
+| project timestamp, message, operation_Id, severityLevel
+| order by timestamp desc
+```
+
+After delivery retries are exhausted, inspect the
+`eventgrid-deadletter` container for Event Grid dead-letter blobs containing
+the original event and delivery failure metadata. Dead-lettering requires the
+Event Grid topic identity's Storage Blob Data Contributor assignment to have
+propagated.
+
+Successful function runs emit `Extracted {documentId} and queued for indexing`.
+On any blob download, extraction, or send failure, the function logs an error
+with the document ID and source URL, then rethrows so Event Grid's delivery
+retry policy can retry it. It does not add another manual retry loop around
+Document Intelligence. Function sampling is enabled in
+[host.json](src/DocIntake.Extractor/host.json), capped at 20 telemetry items per
+second, with Request telemetry excluded from sampling. Application Insights
+traces and dead-letter delivery must be confirmed against deployed resources;
+compilation and automated tests do not verify Azure role propagation,
+Document Intelligence availability, Event Grid delivery, queue contents, or
+live telemetry ingestion.
