@@ -20,3 +20,7 @@ param workerPrincipalType = 'User'
 // Sprint 4: chat model deployment configuration
 param chatSkuName = 'Standard'
 param chatCapacity = 10
+// Sprint 5: cost guardrails
+param monthlyBudgetAmount = 50
+param budgetNotificationEmail = '<admin-email@example.com>'
+

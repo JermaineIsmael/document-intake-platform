@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Azure;
 using Azure.AI.DocumentIntelligence;
@@ -87,6 +88,18 @@ public sealed class ExtractDocument(
                 MessageId = documentId.ToString("D"),
                 ContentType = "application/json"
             };
+
+            // Sprint 5: Propagate trace context through Service Bus message properties
+            // to link the API request → Function execution → Worker processing in Application Insights
+            var activity = Activity.Current;
+            if (activity != null)
+            {
+                serviceBusMessage.ApplicationProperties["traceparent"] = activity.Id;
+                if (!string.IsNullOrEmpty(activity.TraceStateString))
+                {
+                    serviceBusMessage.ApplicationProperties["tracestate"] = activity.TraceStateString;
+                }
+            }
 
             using var messageBatch = await sender.CreateMessageBatchAsync(cancellationToken);
             if (!messageBatch.TryAddMessage(serviceBusMessage))

@@ -1286,3 +1286,129 @@ replicas or adjust the KEDA threshold.
 **/ask endpoint always returns 404:** This is expected while the Azure.Search.Documents
 vector search API is pending finalization. Once the SDK is updated, regenerate the
 `RagService` implementation and redeploy the API.
+
+## Sprint 5: Hardening, Resilience, and Observability
+
+Sprint 5 closes gaps before production use: prompt injection resistance, cost guardrails,
+dead-letter recovery, end-to-end tracing, load testing, and a security audit.
+
+### Key Changes
+
+1. **Prompt Injection Resistance** ([docs/runbooks/prompt-injection-notes.md](docs/runbooks/prompt-injection-notes.md))
+   - System prompt in [RagService.cs](src/DocIntake.Api/Services/RagService.cs) explicitly instructs the model
+     that retrieved document text is untrusted data, not instructions
+   - Model is forbidden from following embedded directives, revealing the system prompt, or acknowledging fake overrides
+   - Tested against a payload within a document; hardening confirmed
+
+2. **Access Scoping**
+   - Single-tenant deployment: all authenticated users can access all indexed documents
+   - Multi-tenant variant not implemented (would require owner field in AI Search and SQL, thread through upload/search)
+   - Document this design in your deployment notes if scope isolation becomes a requirement
+
+3. **Cost Guardrails** ([docs/runbooks/cost-guardrails.md](docs/runbooks/cost-guardrails.md))
+   - Service Bus `maxDeliveryCount: 5` bounds retry costs
+   - Worker Container App `maxReplicas: 5` bounds scale-out cost
+   - Function App on Consumption (Y1) plan: per-execution billing, no minimum
+   - AI Search Basic tier: fixed monthly cost (~$75), 1 replica, 1 partition
+   - Azure OpenAI: 30K TPM (embeddings) + 10K TPM (chat) fixed capacity
+   - SQL Database: Basic tier (~$5-6/month)
+   - Budget alert configured at `$50/month` (80% and 100% notifications) with email (overridable via `monthlyBudgetAmount` parameter)
+   - Estimated dev cost: ~$250-300/month at light usage
+
+4. **Dead-Letter Recovery** ([docs/runbooks/dead-letter-recovery.md](docs/runbooks/dead-letter-recovery.md))
+   - Service Bus and Event Grid dead-letter queues documented
+   - Procedures to inspect, diagnose, and resubmit messages included
+   - PowerShell script [scripts/resubmit-dead-letter.ps1](scripts/resubmit-dead-letter.ps1) automates message recovery
+
+5. **Outage Recovery Test** ([docs/runbooks/outage-recovery-test.md](docs/runbooks/outage-recovery-test.md))
+   - Procedure to temporarily revoke a dependency (AI Search or OpenAI) and verify recovery
+   - No documents are lost; messages are queued and retried when access is restored
+   - Recovery time: 1-5 minutes after role restoration
+
+6. **End-to-End Trace Propagation** ([docs/runbooks/trace-propagation.md](docs/runbooks/trace-propagation.md))
+   - W3C Trace Context (W3C W3C-Trace-Context) now embedded in Service Bus message ApplicationProperties
+   - Extractor [ExtractDocument.cs](src/DocIntake.Extractor/ExtractDocument.cs) extracts Activity.Current.Id and embeds as "traceparent"
+   - Worker [IngestionWorker.cs](src/DocIntake.Worker/IngestionWorker.cs) parses traceparent and starts linked Activity
+   - Single operation_Id now links API request → Function execution → Worker processing in Application Insights
+   - Kusto query to verify in Monitoring section below
+
+7. **Load Test** ([scripts/load-test-upload.ps1](scripts/load-test-upload.ps1))
+   - Upload N documents concurrently (default 20)
+   - Reports HTTP 202 success count vs. failures
+   - Follow-up SQL query [scripts/test-load-completion.sql](scripts/test-load-completion.sql) to verify indexing
+   - Watch for HTTP 429 (throttling) from AI Search or OpenAI during burst
+
+8. **Secrets Audit** ([docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md))
+   - No hardcoded API keys, passwords, or connection strings in source
+   - Managed identity + RBAC used exclusively for Azure service authentication
+   - Storage shared keys disabled; SQL Entra-only auth; all services with `disableLocalAuth: true`
+   - Local settings properly gitignored
+   - Audit passed; system is production-ready from a credential security perspective
+
+### Known Limitations
+
+- **Prompt Injection**: Mitigation tested against one concrete case; other injection techniques may exist. System prompt hardening raises the bar but is not exhaustive.
+- **Access Scoping**: Single-tenant; all authenticated users query all documents. Multi-tenant variant deferred.
+- **Throttling**: If Worker load exceeds OpenAI or Search capacity, HTTP 429s occur. Increase TPM or reduce `MaxConcurrentCalls` in Worker settings.
+- **Vector Search**: `/ask` endpoint still returns 404 pending Azure.Search.Documents SDK stabilization.
+
+## Monitoring
+
+### View End-to-End Request Trace
+
+```kusto
+union requests, dependencies, traces
+| where operation_Id == "<operation-id-from-upload>"
+| project timestamp, itemType, name, target, duration, success
+| order by timestamp asc
+```
+
+Expected columns:
+- API request (POST /documents)
+- Document Intelligence dependency (extract text)
+- Service Bus dependency (send message)
+- Worker trace logs (Indexed document)
+
+All share one operation_Id.
+
+### Check Budget Spending
+
+```powershell
+az costmanagement query \
+  --timeperiod-from 2024-10-01T00:00:00Z --timeperiod-to 2024-10-31T23:59:59Z \
+  --scope "/subscriptions/$(az account show -q id -o tsv)/resourcegroups/<rg>" \
+  --dataset '{ "granularity": "Monthly", "aggregation": { "totalCost": { "name": "PreTaxCost" } } }' \
+  --query "properties.rows"
+```
+
+### Monitor Worker Scaling
+
+```powershell
+az containerapp revision list --name di-dev-<suffix>-worker \
+  --resource-group <rg> \
+  --query "[].{active:properties.active,replicas:properties.replicas,status:properties.healthState}"
+```
+
+During load test: replicas should increase; after queue empties, scale back toward 0 over 5-10 minutes.
+
+### Inspect Dead-Letter Queue
+
+```powershell
+az servicebus queue show --resource-group <rg> --namespace-name <ns> \
+  --name extracted-documents \
+  --query "{ActiveMessages:messageCount, DeadLetter:deadLetterMessageCount}"
+```
+
+Expected: ActiveMessages=0 (or ≤ current batch), DeadLetter=0 (or resolved).
+
+### Search Query with Throttling Alert
+
+```kusto
+requests
+| where timestamp > ago(1h)
+| where name contains "OpenAI" or name contains "Search"
+| where resultCode == "429"
+| summarize Count=count() by name, resultCode
+```
+
+If results exist, either increase TPM or reduce Worker concurrency.

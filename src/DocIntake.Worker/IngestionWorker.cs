@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
 using Azure.Search.Documents.Indexes;
@@ -87,66 +88,106 @@ public sealed class IngestionWorker(
         var message = args.Message;
         var ct = args.CancellationToken;
 
-        if (!TryParse(message, out var document, out var parseError))
+        // Sprint 5: Extract trace context from message properties to link spans across Service Bus hop
+        Activity? linkedActivity = null;
+        if (message.ApplicationProperties.TryGetValue("traceparent", out var traceparentObj)
+            && traceparentObj is string traceparent)
         {
-            // A malformed message fails identically on every delivery, so retrying only delays it.
-            logger.LogError(
-                "Message {MessageId} is not a valid DocumentMessage on delivery {DeliveryCount}: {Reason}",
-                message.MessageId,
-                message.DeliveryCount,
-                parseError);
-            await SettleAsync(() => args.DeadLetterMessageAsync(
-                message, "InvalidDocumentMessage", Truncate(parseError), ct), message, "dead-letter").ConfigureAwait(false);
-            return;
+            try
+            {
+                // Parse W3C traceparent format (version-trace_id-parent_id-trace_flags)
+                // and create/continue an Activity with the extracted context
+                var parts = traceparent.Split('-');
+                if (parts.Length >= 4)
+                {
+                    var traceId = ActivityTraceId.CreateFromString(parts[1].AsSpan());
+                    var spanId = ActivitySpanId.CreateFromString(parts[2].AsSpan());
+                    var flags = (ActivityTraceFlags)byte.Parse(parts[3], System.Globalization.NumberStyles.HexNumber);
+                    
+                    var context = new ActivityContext(traceId, spanId, flags);
+                    linkedActivity = new Activity($"ProcessMessage-{message.MessageId}")
+                        .SetParentId(traceparent);
+                    if (message.ApplicationProperties.TryGetValue("tracestate", out var tracestate))
+                    {
+                        linkedActivity.TraceStateString = tracestate.ToString();
+                    }
+                    linkedActivity.Start();
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to parse trace context from message properties; continuing without linked trace");
+            }
         }
-
-        var documentId = document.DocumentId.ToString("D");
-        using var scope = logger.BeginScope(new Dictionary<string, object> { ["DocumentId"] = documentId });
 
         try
         {
-            await indexer.IndexAsync(document, ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            logger.LogInformation("Processing of {DocumentId} was cancelled by shutdown; abandoning for redelivery", documentId);
-            await SettleAsync(() => args.AbandonMessageAsync(message, cancellationToken: CancellationToken.None), message, "abandon")
-                .ConfigureAwait(false);
-            return;
-        }
-        catch (Exception ex)
-        {
-            if (message.DeliveryCount >= _options.MaxDeliveryCount)
+            if (!TryParse(message, out var document, out var parseError))
             {
+                // A malformed message fails identically on every delivery, so retrying only delays it.
                 logger.LogError(
-                    ex,
-                    "Indexing failed for {DocumentId} on delivery {DeliveryCount} of {MaxDeliveryCount}; dead-lettering",
-                    documentId,
+                    "Message {MessageId} is not a valid DocumentMessage on delivery {DeliveryCount}: {Reason}",
+                    message.MessageId,
                     message.DeliveryCount,
-                    _options.MaxDeliveryCount);
+                    parseError);
                 await SettleAsync(() => args.DeadLetterMessageAsync(
-                    message,
-                    "IndexingFailed",
-                    Truncate($"{ex.GetType().FullName}: {ex.Message}"),
-                    CancellationToken.None), message, "dead-letter").ConfigureAwait(false);
+                    message, "InvalidDocumentMessage", Truncate(parseError), ct), message, "dead-letter").ConfigureAwait(false);
+                return;
             }
-            else
+
+            var documentId = document.DocumentId.ToString("D");
+            using var scope = logger.BeginScope(new Dictionary<string, object> { ["DocumentId"] = documentId });
+
+            try
             {
-                logger.LogError(
-                    ex,
-                    "Indexing failed for {DocumentId} on delivery {DeliveryCount} of {MaxDeliveryCount}; abandoning for redelivery",
-                    documentId,
-                    message.DeliveryCount,
-                    _options.MaxDeliveryCount);
+                await indexer.IndexAsync(document, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                logger.LogInformation("Processing of {DocumentId} was cancelled by shutdown; abandoning for redelivery", documentId);
                 await SettleAsync(() => args.AbandonMessageAsync(message, cancellationToken: CancellationToken.None), message, "abandon")
                     .ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex)
+            {
+                if (message.DeliveryCount >= _options.MaxDeliveryCount)
+                {
+                    logger.LogError(
+                        ex,
+                        "Indexing failed for {DocumentId} on delivery {DeliveryCount} of {MaxDeliveryCount}; dead-lettering",
+                        documentId,
+                        message.DeliveryCount,
+                        _options.MaxDeliveryCount);
+                    await SettleAsync(() => args.DeadLetterMessageAsync(
+                        message,
+                        "IndexingFailed",
+                        Truncate($"{ex.GetType().FullName}: {ex.Message}"),
+                        CancellationToken.None), message, "dead-letter").ConfigureAwait(false);
+                }
+                else
+                {
+                    logger.LogError(
+                        ex,
+                        "Indexing failed for {DocumentId} on delivery {DeliveryCount} of {MaxDeliveryCount}; abandoning for redelivery",
+                        documentId,
+                        message.DeliveryCount,
+                        _options.MaxDeliveryCount);
+                    await SettleAsync(() => args.AbandonMessageAsync(message, cancellationToken: CancellationToken.None), message, "abandon")
+                        .ConfigureAwait(false);
+                }
+
+                return;
             }
 
-            return;
+            await SettleAsync(() => args.CompleteMessageAsync(message, CancellationToken.None), message, "complete")
+                .ConfigureAwait(false);
         }
-
-        await SettleAsync(() => args.CompleteMessageAsync(message, CancellationToken.None), message, "complete")
-            .ConfigureAwait(false);
+        finally
+        {
+            linkedActivity?.Stop();
+            linkedActivity?.Dispose();
+        }
     }
 
     // Transport/infrastructure errors (connection, authorization, lock renewal), distinct from

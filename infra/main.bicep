@@ -189,6 +189,13 @@ param chatSkuName string = 'Standard'
 @minValue(10)
 param chatCapacity int = 10
 
+@description('Monthly budget limit in USD for the resource group. Alerts at 80% and 100% threshold. Set to 0 to disable budgets.')
+@minValue(0)
+param monthlyBudgetAmount int = 50
+
+@description('Email address to receive budget notifications.')
+param budgetNotificationEmail string = ''
+
 var chatDeploymentName = 'gpt-4o'
 resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2026-09-01' = {
   parent: openAi
@@ -819,6 +826,52 @@ resource workerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-
 // Sprint 4: Grant Worker managed identity SQL database access (db_datawriter, db_datareader roles via Entra user).
 // The actual SQL role assignment happens in sql/schema.sql via CREATE USER [<worker-identity-name>] FROM EXTERNAL PROVIDER.
 // Here we just note that the Worker's system-assigned managed identity must be granted these SQL roles after deployment.
+
+// Sprint 5: Resource group budget with email notifications at 80% and 100% thresholds.
+// Note: Budget alerts require that budgetNotificationEmail is non-empty. Email recipients must accept
+// the invitation sent to their address to receive future notifications. Budgets are advisory; they do not
+// automatically prevent resource creation or usage beyond the threshold. Use them in conjunction with
+// consumption spending limits and monitoring alerts.
+resource budget 'Microsoft.Consumption/budgets@2021-10-01' = if (monthlyBudgetAmount > 0 && !empty(budgetNotificationEmail)) {
+  name: '${prefix}-monthly-budget'
+  properties: {
+    displayName: 'DocIntake Monthly Budget'
+    category: 'Cost'
+    amount: monthlyBudgetAmount
+    timeGrain: 'Monthly'
+    timePeriod: {
+      startDate: utcNow('yyyy-MM-01')
+      endDate: '2099-12-31'
+    }
+    filter: {
+      dimensions: {
+        name: 'ResourceGroupName'
+        operator: 'In'
+        values: [
+          resourceGroup().name
+        ]
+      }
+    }
+    notifications: {
+      NotificationForExceededBudget80Percent: {
+        enabled: true
+        operator: 'GreaterThanOrEqualTo'
+        threshold: 80
+        contactEmails: [
+          budgetNotificationEmail
+        ]
+      }
+      NotificationForExceededBudget100Percent: {
+        enabled: true
+        operator: 'GreaterThanOrEqualTo'
+        threshold: 100
+        contactEmails: [
+          budgetNotificationEmail
+        ]
+      }
+    }
+  }
+}
 
 output apiFqdn string = api.outputs.fqdn
 output acrName string = registry.name
