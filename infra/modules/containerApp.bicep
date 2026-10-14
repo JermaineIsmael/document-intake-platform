@@ -6,6 +6,22 @@ type environmentVariable = {
   secretRef: string?
 }
 
+type scaleRule = {
+  name: string
+  custom: {
+    type: string
+    metadata: object
+    auth: {
+      secretRef: string
+    }[]?
+  }?
+  http: {
+    metadata: {
+      concurrentRequests: string
+    }
+  }?
+}
+
 param name string
 param location string
 param environmentId string
@@ -28,6 +44,9 @@ param secrets {
     value: string
   }[]?
 } = {}
+
+param scaleRules scaleRule[] = []
+
 
 resource app 'Microsoft.App/containerApps@2025-01-01' = {
   name: name
@@ -95,6 +114,7 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
       scale: {
         minReplicas: minReplicas
         maxReplicas: maxReplicas
+        rules: scaleRules
       }
     }
   }

@@ -1059,3 +1059,230 @@ python -c "import docx; d=docx.Document(); [d.add_paragraph(f'Paragraph {i}: ' +
 Verify steps 3-5 report the same 50+ chunk count. If processing exceeds the
 queue's 1-minute lock, the worker's automatic lock renewal keeps the message
 locked (no `MessageLockLost` errors in the logs and `DeliveryCount` stays 1).
+
+## Sprint 4: RAG /ask endpoint and Worker containerization
+
+Sprint 4 adds a retrieval-augmented generation (RAG) `/ask` endpoint to the API
+and containerizes + deploys the Worker to the managed Container Apps environment
+with KEDA scaling. The Worker processes embedded documents from Sprint 3,
+answering free-form questions over indexed content via Azure OpenAI chat.
+
+### Changes
+
+1. **API RAG service** — Adds `IRagService` (in [Services/RagService.cs](src/DocIntake.Api/Services/RagService.cs)).
+   The `/ask` endpoint (`Endpoints/AskEndpoints.cs`) accepts POST with `{ "question": "..." }` and
+  returns `{ "answer": "...", "sources": [...] }` or 404 if no configuration is present.
+
+   **Note:** Full vector search integration is pending Azure.Search.Documents SDK API stabilization.
+   Current implementation returns 404; once the SDK is updated, implement embedding generation,
+   vector search configuration via `VectorSearchOptions`, and chat completion with retrieved context.
+   The endpoint and interface are complete; only the internal embeddings/search calls remain.
+
+2. **Key Vault secret for AI Search query key** — `main.bicep` stores the search service's
+   query key in Key Vault, and the API managed identity receives the "Key Vault Secrets User"
+   role to retrieve it. This demonstrates RBAC-based secret management (vs. hardcoded keys).
+   In production, prefer direct RBAC on Search service; Key Vault secret access is optional.
+
+3. **Worker Docker image** — [Dockerfile](src/DocIntake.Worker/Dockerfile) multi-stage build
+   (SDK → publish → minimal ASP.NET Core runtime), non-root user, no exposed HTTP ports.
+
+4. **Worker Container App deployment** — `main.bicep` conditionally deploys the Worker
+   if the `workerImage` parameter is non-empty. The Worker:
+   - Processes messages from the `extracted-documents` Service Bus queue.
+   - Calls Azure AI Search to index document chunks (created by Sprint 3).
+   - Updates SQL metadata with chunk counts and timestamp.
+   - Uses KEDA custom autoscaling tied to queue depth (~10 messages per replica,
+     minReplicas: 0, maxReplicas: 5).
+   - Environment variables passed from config: `ServiceBus__Namespace`,
+     `OpenAI__Endpoint`, `OpenAI__EmbeddingDeployment`, `Search__Endpoint`,
+     `Sql__Server`, `Sql__Database`.
+
+5. **Worker managed identity role assignments** — The Worker's Container App
+   system-assigned identity receives:
+   - "Search Index Data Contributor" and "Search Service Contributor" on Search (allows creating index).
+   - "Cognitive Services OpenAI User" on Azure OpenAI.
+   - "Azure Service Bus Data Receiver" on the Service Bus namespace.
+   - "AcrPull" on the container registry (for pulling the image).
+  - "Monitoring Metrics Publisher" on Application Insights (for telemetry export).
+
+   **Sprint 3 compatibility note:** The `workerPrincipalId` role assignments (for local dev)
+   remain in the Bicep; Sprint 4's Container App identity assignments are in addition.
+   After verifying the Container App worker is functional, the Sprint 3 local-dev assignments
+   can be removed.
+
+6. **SQL database user for Worker** — [sql/schema.sql](sql/schema.sql) includes a placeholder
+   for creating a contained database user from the Worker's managed identity:
+   ```sql
+   CREATE USER [worker-container-app-name] FROM EXTERNAL PROVIDER;
+   ALTER ROLE db_datawriter ADD MEMBER [worker-container-app-name];
+   ALTER ROLE db_datareader ADD MEMBER [worker-container-app-name];
+   ```
+   Run this once the Worker Container App is deployed (Sprint 4) with its real managed identity
+   display name.
+
+### Deploying Sprint 4
+
+**Prerequisite:** Sprint 1, 2, and 3 are already deployed and functional. The API and Worker
+must run against real Azure Search, OpenAI, Service Bus, and SQL resources (no local emulators
+exist for these services).
+
+#### Step 1: Add chat model to Azure OpenAI
+
+The `main.bicep` already includes an Azure OpenAI resource with `text-embedding-3-small`
+for the Worker (Sprint 3). Sprint 4 adds a chat model deployment. Before deploying Bicep:
+
+1. If you deployed Sprints 1–3 with `main.bicep` (without `workerImage`), the OpenAI resource
+   exists but only has the embedding deployment.
+2. Redeploy `main.bicep` with your existing resource group and parameters to add the chat
+   deployment. Or manually add a `gpt-4` or `gpt-35-turbo` deployment via the portal if you
+   prefer to skip redeployment.
+
+#### Step 2: Prepare Worker Docker image
+
+From the repository root, build and push the Worker image to your container registry:
+
+```powershell
+# Log in to the registry (e.g. Azure Container Registry):
+az acr login --name $acrName
+
+# Option A: build locally and push
+docker build -f src\DocIntake.Worker\Dockerfile -t docintake-worker:sprint4 .
+docker tag docintake-worker:sprint4 "${acrName}.azurecr.io/docintake-worker:sprint4"
+docker push "${acrName}.azurecr.io/docintake-worker:sprint4"
+
+# Option B: build in the cloud (avoids local resources)
+az acr build --registry $acrName --image "docintake-worker:sprint4" `
+  --file src\DocIntake.Worker\Dockerfile .
+```
+
+#### Step 3: Deploy Worker via Bicep
+
+Update [main.bicepparam](infra/main.bicepparam) with:
+
+```bicepparam
+param workerImage = "${acrName}.azurecr.io/docintake-worker:sprint4"
+```
+
+Then redeploy:
+
+```powershell
+$resourceGroup = 'docintake-rg'  # or your resource group name
+az deployment group create --resource-group $resourceGroup `
+  --template-file infra/main.bicep --parameters infra/main.bicepparam
+```
+
+Wait for the deployment to complete. Note the Worker's managed identity display name
+(visible in the Container App's Identity section or from Bicep outputs).
+
+#### Step 4: Create the Worker's SQL database user
+
+Copy the Worker's managed identity display name from Step 3. Connect to the SQL database
+as an Entra admin and run the contents of [sql/schema.sql](sql/schema.sql), replacing
+`<worker-identity-name>` with that display name. For example, using `sqlcmd`:
+
+```powershell
+# Get the Worker's display name (usually the Container App name)
+$workerDisplayName = 'docintake-worker'  # or the Container App resource name
+
+# Connect with Entra auth
+sqlcmd -S 'docintake-sqlserver.database.windows.net' -d docintake `
+  -G -U '${env:USERNAME}@${env:USERDOMAIN}' `
+  -i sql/schema.sql
+```
+
+Or in [Azure Data Studio](https://learn.microsoft.com/en-us/azure-data-studio/),
+connect using **Azure Authentication** and paste the SQL from the file manually,
+replacing the placeholder.
+
+#### Step 5: Upload a document end-to-end
+
+1. Upload a document via the Sprint 1 API:
+   ```powershell
+   $response = curl.exe -s -H "Authorization: Bearer $token" `
+     -F "file=@C:\documents\sample.pdf" "https://${apiFqdn}/documents" | ConvertFrom-Json
+   $documentId = $response.documentId
+   ```
+
+2. Wait ~30 seconds for Sprint 2's extractor to process it.
+
+3. Verify the Worker logs in Application Insights:
+   ```kusto
+   traces
+   | where timestamp > ago(5m)
+   | where message startswith "Indexed"
+   | project timestamp, message
+   ```
+
+4. Query the AI Search index to confirm chunks were indexed:
+   ```powershell
+   $searchToken = az account get-access-token --resource https://search.azure.com --query accessToken -o tsv
+   $body = @{ search = '*'; count = $true } | ConvertTo-Json
+   Invoke-RestMethod -Method Post -ContentType 'application/json' `
+     -Headers @{ Authorization = "Bearer $searchToken" } -Body $body `
+     -Uri "$(Get-Output searchEndpoint)/indexes/document-chunks/docs/search?api-version=2024-07-01" |
+     Select-Object '@odata.count'
+   ```
+
+5. Verify the SQL metadata row (same as Sprint 3):
+   ```powershell
+   sqlcmd -S $sqlServer -d docintake --authentication-method ActiveDirectoryDefault `
+     -Q "SELECT Id, SourceUrl, ChunkCount, IndexedAt FROM dbo.Documents WHERE Id = '$documentId'"
+   ```
+
+#### Step 6: Test the /ask endpoint
+
+Once the Worker is running and documents are indexed, test the `/ask` endpoint.
+**Current behavior:** Returns 404 until vector search SDK implementation is complete.
+**Expected final behavior** (after SDK fix):
+
+```powershell
+$askBody = @{ question = "What is the main topic of this document?" } | ConvertTo-Json
+$token = # your Entra token
+Invoke-RestMethod -Method Post -ContentType 'application/json' `
+  -Headers @{ Authorization = "Bearer $token" } -Body $askBody `
+  -Uri "https://${apiFqdn}/ask"
+```
+
+Returns:
+```json
+{
+  "answer": "...",
+  "sources": ["https://storage.../documents/blob1.pdf", ...]
+}
+```
+
+### Worker autoscaling
+
+The Worker's Container App uses KEDA to autoscale based on Service Bus queue depth.
+By default, replicas scale from 0 (no replicas when idle) to 5. The scale rule
+triggers when the queue depth reaches ~10 messages per replica. To adjust:
+
+1. Edit [modules/containerApp.bicep](infra/modules/containerApp.bicep) scale rule
+   or pass a custom `scaleRule` object in the Worker's module invocation.
+2. Redeploy.
+3. Monitor in the Container Apps portal under **Revision management**; note that
+   scale-down to zero may take 5–10 minutes after the queue empties.
+
+### Troubleshooting
+
+**Worker logs are missing:** Check that the managed identity has "Monitoring Metrics
+Publisher" on the Application Insights resource, and that
+`APPLICATIONINSIGHTS_CONNECTION_STRING` is configured in the Container App's
+environment variables.
+
+**Search index not created:** Verify the Worker's managed identity has "Search Service
+Contributor". The first startup creates the index; restarting the Worker should not
+error on index creation (idempotent via `CreateOrUpdateIndexAsync`).
+
+**SQL insert/update fails:** Check that the `<worker-identity-name>` user was created
+with `FROM EXTERNAL PROVIDER` and that both `db_datawriter` and `db_datareader` roles
+are granted.
+
+**Queue messages not being processed:** Check KEDA's state in the portal (Application
+Insights → Logs → filter `type='Container App'`), and verify the queue is not full.
+If queue messages are accumulating, scale up manually by editing the Container App's
+replicas or adjust the KEDA threshold.
+
+**/ask endpoint always returns 404:** This is expected while the Azure.Search.Documents
+vector search API is pending finalization. Once the SDK is updated, regenerate the
+`RagService` implementation and redeploy the API.

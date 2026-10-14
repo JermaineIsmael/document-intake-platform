@@ -17,12 +17,14 @@ GO
 -- Worker identity database user.
 --
 -- Sprint 3: the worker runs locally under YOUR OWN Entra identity (DefaultAzureCredential picks up
--- az login / Visual Studio). Members of the admin group already have full access, so this section
--- is not required for local testing; if you test with a non-admin account, use its UPN here.
+-- az login / Visual Studio). If testing with the admin group account, this section can be skipped;
+-- the admin group already has full access. If testing with a different Entra user, replace
+-- <worker-identity-name> with that user's UPN or display name.
 --
 -- Sprint 4: replace <worker-identity-name> with the worker Container App's system-assigned managed
--- identity display name (the Container App name) and run this section once that identity exists.
--- CREATE USER ... FROM EXTERNAL PROVIDER fails if the name doesn't resolve to an Entra principal.
+-- identity name (set in Bicep as '${prefix}-worker') and run this section once the Container App exists.
+-- The managed identity's display name in Entra ID is typically the Container App resource name.
+-- CREATE USER ... FROM EXTERNAL PROVIDER fails if the identity doesn't exist or the name doesn't match exactly.
 IF DATABASE_PRINCIPAL_ID(N'<worker-identity-name>') IS NULL
 BEGIN
     CREATE USER [<worker-identity-name>] FROM EXTERNAL PROVIDER;

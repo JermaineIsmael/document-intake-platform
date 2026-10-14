@@ -1,5 +1,7 @@
+using Azure.AI.OpenAI;
 using Azure.Identity;
 using Azure.Monitor.OpenTelemetry.AspNetCore;
+using Azure.Search.Documents;
 using Azure.Storage.Blobs;
 using DocIntake.Api.Configuration;
 using DocIntake.Api.Endpoints;
@@ -10,6 +12,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Options;
+using OpenAI.Chat;
 using OpenTelemetry.Logs;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -54,6 +57,46 @@ builder.Services.AddSingleton<BlobContainerClient>(services =>
         services.GetRequiredService<IHostEnvironment>()));
 builder.Services.AddSingleton<DocumentStore>();
 
+// Sprint 4: RAG service for /ask endpoint.
+var searchEndpoint = builder.Configuration["Search:Endpoint"];
+var openAiEndpoint = builder.Configuration["OpenAI:Endpoint"];
+var embeddingDeployment = builder.Configuration["OpenAI:EmbeddingDeployment"];
+var chatDeployment = builder.Configuration["OpenAI:ChatDeployment"];
+const string SearchIndexName = "document-chunks"; // Must match IndexSchema.IndexName in Worker
+
+// Register RAG service only if all config values are present
+var hasRagConfig = !string.IsNullOrWhiteSpace(searchEndpoint)
+    && !string.IsNullOrWhiteSpace(openAiEndpoint)
+    && !string.IsNullOrWhiteSpace(embeddingDeployment)
+    && !string.IsNullOrWhiteSpace(chatDeployment);
+
+if (hasRagConfig)
+{
+    if (!Uri.TryCreate(searchEndpoint, UriKind.Absolute, out var searchUri) || searchUri?.Scheme != Uri.UriSchemeHttps)
+    {
+        throw new InvalidOperationException("Search:Endpoint must be an absolute HTTPS URL.");
+    }
+
+    if (!Uri.TryCreate(openAiEndpoint, UriKind.Absolute, out var openAiUri) || openAiUri?.Scheme != Uri.UriSchemeHttps)
+    {
+        throw new InvalidOperationException("OpenAI:Endpoint must be an absolute HTTPS URL.");
+    }
+
+    var credential = new DefaultAzureCredential();
+    builder.Services.AddSingleton(_ => new AzureOpenAIClient(openAiUri, credential));
+    builder.Services.AddSingleton(_ => new SearchClient(new Uri(searchEndpoint!), SearchIndexName, credential));
+    builder.Services.AddSingleton(services =>
+        services.GetRequiredService<AzureOpenAIClient>().GetEmbeddingClient(embeddingDeployment));
+    builder.Services.AddSingleton(services =>
+        services.GetRequiredService<AzureOpenAIClient>().GetChatClient(chatDeployment));
+    builder.Services.AddSingleton<IRagService, RagService>();
+}
+else
+{
+    // Register null RAG service for tests that don't provide config
+    builder.Services.AddSingleton<IRagService>(_ => new NullRagService());
+}
+
 if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING")))
 {
     builder.Services.AddOpenTelemetry().UseAzureMonitor(options =>
@@ -92,6 +135,7 @@ app.MapHealthChecks("/health/live").AllowAnonymous();
 app.MapHealthChecks("/health").AllowAnonymous();
 app.MapGet("/", () => new ServiceStatus("DocIntake.Api")).RequireAuthorization();
 app.MapDocumentEndpoints();
+app.MapAskEndpoints();
 
 app.Run();
 
