@@ -47,6 +47,7 @@ steps:
         --configuration Release
         --output $(Build.ArtifactStagingDirectory)/extractor-publish
       zipAfterPublish: false
+      modifyOutputPath: false
 
   - task: ArchiveFiles@2
     displayName: Package Extractor

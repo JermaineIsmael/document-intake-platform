@@ -46,24 +46,24 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
 
 ### 3. Azure Function App (Extractor)
 
-**Setting**: Consumption (Y1) plan ([main.bicep](../../infra/main.bicep))
+**Setting**: Flex Consumption (FC1) plan ([main.bicep](../../infra/main.bicep))
 
-**Effect**: Function execution is billed per 100ms of compute time and memory allocation (GB-seconds). No minimum spend.
+**Effect**: On-demand execution is billed by execution count and memory-duration usage. No always-ready instances are configured.
 
-**Cost Impact**: Consumption plan is inherently bounded by execution time and frequency. At typical extraction speeds (~2-5 seconds/document), cost per document is roughly $0.000001-0.000002 in compute charges.
+**Cost Impact**: The app uses 2048 MiB instances and a maximum of 40 instances. This bounds concurrency, not total monthly spend; estimate costs using current regional Flex Consumption pricing and measured extraction duration.
 
 **Verification**:
 ```bicep
-resource functionPlan 'Microsoft.Web/serverfarms@2022-03-01' = {
+resource functionPlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   sku: {
-    name: 'Y1'
-    tier: 'Dynamic'
+    name: 'FC1'
+    tier: 'FlexConsumption'
   }
   // ...
 }
 ```
 
-**Note**: Function storage account uses a separate storage account (AzureWebJobsStorage) for function host bookkeeping; this has minimal cost (typically <$1/month for the diagnostic tables and queues).
+**Note**: Host bookkeeping and the private `extractor-packages` deployment container use the document storage account via managed identity. Storage operations and retained packages incur separate charges.
 
 ### 4. Azure AI Search
 
@@ -177,7 +177,7 @@ resource documentIntelligence 'Microsoft.CognitiveServices/accounts@2026-09-01' 
 | --- | --- | --- |
 | Service Bus (Standard, 0 capacity) | ~$5-10 | Small namespace with minimal throughput |
 | Worker Container App (Consumption, 0-5 replicas) | ~$5-20 | Scales to 0 when idle |
-| Function App (Y1 Consumption) | ~$0.20 | If <1M executions/month |
+| Function App (FC1 Flex Consumption) | Usage-dependent | Execution count and GB-seconds; no always-ready instances |
 | AI Search (Basic) | ~$75 | Fixed |
 | OpenAI (S0 + 30K TPM embedding + 10K TPM chat) | ~$60-80 | Fixed capacity allocation |
 | SQL Database (Basic) | ~$5-6 | Fixed |
@@ -253,11 +253,10 @@ az costmanagement query --timeperiod-from 2024-10-01T00:00:00Z --timeperiod-to 2
 
 - [ ] Service Bus maxDeliveryCount = 5
 - [ ] Worker maxReplicas = 5
-- [ ] Function App = Y1 Consumption
+- [ ] Function App = FC1 Flex Consumption; no always-ready instances
 - [ ] AI Search = Basic, 1 replica, 1 partition
 - [ ] OpenAI embeddings = 30K TPM capacity
 - [ ] OpenAI chat = 10K TPM capacity
 - [ ] SQL Database = Basic tier
 - [ ] Budget alert resource deployed with email configured
 - [ ] All cost estimates reviewed and acceptable for intended use case
-

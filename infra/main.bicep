@@ -334,6 +334,14 @@ resource eventGridDeadLetter 'Microsoft.Storage/storageAccounts/blobServices/con
   }
 }
 
+resource extractorPackages 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: 'extractor-packages'
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
 resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   name: 'di${env}${suffix}acr'
   location: location
@@ -365,22 +373,20 @@ resource environment 'Microsoft.App/managedEnvironments@2025-01-01' = {
   }
 }
 
-resource functionPlan 'Microsoft.Web/serverfarms@2022-03-01' = {
+resource functionPlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   name: '${prefix}-extractor-plan'
   location: location
   kind: 'functionapp'
   sku: {
-    name: 'Y1'
-    tier: 'Dynamic'
-    size: 'Y1'
-    family: 'Y'
+    name: 'FC1'
+    tier: 'FlexConsumption'
   }
   properties: {
     reserved: true
   }
 }
 
-resource extractor 'Microsoft.Web/sites@2022-03-01' = {
+resource extractor 'Microsoft.Web/sites@2024-04-01' = {
   name: extractorName
   location: location
   kind: 'functionapp,linux'
@@ -391,9 +397,27 @@ resource extractor 'Microsoft.Web/sites@2022-03-01' = {
     serverFarmId: functionPlan.id
     httpsOnly: true
     siteConfig: {
-      linuxFxVersion: 'DOTNET-ISOLATED|8.0'
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
+    }
+    functionAppConfig: {
+      runtime: {
+        name: 'dotnet-isolated'
+        version: '8.0'
+      }
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: '${storage.properties.primaryEndpoints.blob}${extractorPackages.name}'
+          authentication: {
+            type: 'SystemAssignedIdentity'
+          }
+        }
+      }
+      scaleAndConcurrency: {
+        maximumInstanceCount: 40
+        instanceMemoryMB: 2048
+      }
     }
   }
 }
@@ -402,9 +426,6 @@ resource extractorAppSettings 'Microsoft.Web/sites/config@2022-03-01' = {
   parent: extractor
   name: 'appsettings'
   properties: {
-    FUNCTIONS_EXTENSION_VERSION: '~4'
-    FUNCTIONS_WORKER_RUNTIME: 'dotnet-isolated'
-    FUNCTIONS_WORKER_RUNTIME_VERSION: '8.0'
     AzureWebJobsStorage__accountName: storage.name
     AzureWebJobsStorage__credential: 'managedidentity'
     Storage__BlobEndpoint: storage.properties.primaryEndpoints.blob

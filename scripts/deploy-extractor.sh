@@ -20,6 +20,7 @@ az functionapp deployment source config-zip \
   --resource-group "$RESOURCE_GROUP" \
   --name "$EXTRACTOR_NAME" \
   --src "$EXTRACTOR_PACKAGE" \
+  --build-remote false \
   --timeout 1800
 
 state="$(az functionapp show \

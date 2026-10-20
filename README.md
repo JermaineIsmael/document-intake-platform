@@ -362,8 +362,9 @@ context.
 - An Event Grid system topic on the private document storage account, with a
   BlobCreated subscription to the extractor filtered to the `documents`
   container and a managed-identity blob dead-letter destination.
-- A Linux Consumption (Y1) Function App running the built-in .NET 8 isolated
-  stack, with a separate shared-key-disabled host-storage account.
+- A Linux Flex Consumption (FC1) Function App running .NET 8 isolated,
+  with identity-based host storage and a private `extractor-packages` deployment
+  container in the shared-key-disabled document storage account.
 - Extractor RBAC: Storage Blob Data Owner on the document/host storage account,
   Service Bus Data Sender on the namespace, and Cognitive Services User on
   Document Intelligence.
@@ -397,6 +398,18 @@ Configure these Azure DevOps pipeline variables before running it:
 When creating the Azure DevOps pipeline, select the YAML path
 `infra/azure-pipelines.yml`. Create the target resource group before the first
 run.
+
+The Extractor uses Flex Consumption (`FC1`), .NET 8 isolated, 2 GiB instances,
+and a maximum of 40 instances, with no always-ready instances configured.
+Its system-assigned identity uses the existing Storage Blob Data Owner
+assignment for host storage and deployment packages. The pipeline archives
+published files directly at the ZIP root and uses Azure CLI's Flex-aware
+`config-zip` command without remote build (One Deploy).
+Verify Flex Consumption availability and regional memory quota before deployment;
+FC1 removes the Y1 quota dependency but has its own quotas. Existing Y1 plans/apps
+cannot be converted by simply redeploying this template: use a supported migration
+or an explicitly approved recreation of the Extractor resources first. The
+pipeline does not delete existing apps or plans.
 
 The service connection identity needs permission to create/update the resources
 in `main.bicep` and create role assignments (for example, Contributor plus
@@ -711,7 +724,7 @@ storage account, only for its dead-letter writes.
 The Service Bus namespace is Standard and disables local authentication.
 Document Intelligence is S0/FormRecognizer, has a custom subdomain, and
 disables local authentication. The Function App uses the built-in Linux .NET
-isolated stack on a **Consumption (Y1) plan**, not a custom container or ACR
+isolated runtime on a **Flex Consumption (FC1) plan**, not a custom container or ACR
 pull. Per the selected exact-three-role constraint, Function telemetry uses the
 Application Insights connection string generated dynamically from the
 Application Insights resource; local-auth ingestion is enabled on that
@@ -1347,7 +1360,7 @@ dead-letter recovery, end-to-end tracing, load testing, and a security audit.
 3. **Cost Guardrails** ([docs/runbooks/cost-guardrails.md](docs/runbooks/cost-guardrails.md))
    - Service Bus `maxDeliveryCount: 5` bounds retry costs
    - Worker Container App `maxReplicas: 5` bounds scale-out cost
-   - Function App on Consumption (Y1) plan: per-execution billing, no minimum
+   - Function App on Flex Consumption (FC1) plan: on-demand billing, no always-ready instances
    - AI Search Basic tier: fixed monthly cost (~$75), 1 replica, 1 partition
    - Azure OpenAI: 30K TPM (embeddings) + 10K TPM (chat) fixed capacity
    - SQL Database: Basic tier (~$5-6/month)
