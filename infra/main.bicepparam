@@ -18,9 +18,10 @@ param sqlAdminGroupObjectId = 'b289bbca-0224-4517-8d7d-9d3692a12d01'
 param workerPrincipalId = 'b289bbca-0224-4517-8d7d-9d3692a12d01'
 param workerPrincipalType = 'User'
 // Sprint 4: chat model deployment configuration
+// Chat quota is currently zero; ingestion and embeddings can deploy independently.
+param deployChat = false
 param chatSkuName = 'GlobalStandard'
 param chatCapacity = 10
 // Sprint 5: cost guardrails
 param monthlyBudgetAmount = 50
 param budgetNotificationEmail = 'testbudgetnotif@gmail.com'
-

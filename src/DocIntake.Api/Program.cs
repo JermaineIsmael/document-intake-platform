@@ -62,10 +62,11 @@ var searchEndpoint = builder.Configuration["Search:Endpoint"];
 var openAiEndpoint = builder.Configuration["OpenAI:Endpoint"];
 var embeddingDeployment = builder.Configuration["OpenAI:EmbeddingDeployment"];
 var chatDeployment = builder.Configuration["OpenAI:ChatDeployment"];
+var chatEnabled = builder.Configuration.GetValue("OpenAI:ChatEnabled", true);
 const string SearchIndexName = "document-chunks"; // Must match IndexSchema.IndexName in Worker
 
 // Register RAG service only if all config values are present
-var hasRagConfig = !string.IsNullOrWhiteSpace(searchEndpoint)
+var hasRagConfig = chatEnabled && !string.IsNullOrWhiteSpace(searchEndpoint)
     && !string.IsNullOrWhiteSpace(openAiEndpoint)
     && !string.IsNullOrWhiteSpace(embeddingDeployment)
     && !string.IsNullOrWhiteSpace(chatDeployment);
@@ -111,6 +112,10 @@ if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("APPLICATIONIN
 }
 
 var app = builder.Build();
+if (!chatEnabled)
+{
+    app.Logger.LogWarning("Chat is disabled by configuration. The /ask endpoint will return HTTP 503.");
+}
 var bypassAuth = app.Environment.IsDevelopment()
     && app.Configuration.GetValue<bool>("Development:BypassAuth");
 if (bypassAuth)

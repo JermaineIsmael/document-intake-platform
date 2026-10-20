@@ -426,6 +426,16 @@ deploys all three projects. For normal releases, leave it false: the pipeline
 expects the resource group to contain the infrastructure and exactly one ACR.
 Image tags use the Azure DevOps build ID.
 
+Chat deployment is optional: `deployChat` defaults to `true` in the template,
+but this environment's parameters set it to `false` because chat quota is zero.
+Uploads, extraction, and embedding/indexing remain enabled. The API logs a
+startup warning and returns HTTP 503 with `{"error":"Chat is disabled for this environment."}`
+for valid authenticated `/ask` requests while disabled; invalid questions still
+return HTTP 400. The `chatDeploymentName` output is empty when disabled.
+After obtaining quota, set `deployChat = true` and redeploy with the desired
+`chatSkuName` and `chatCapacity`. Disabling chat does not delete a previously
+created model deployment in an incremental deployment or reclaim its quota.
+
 The Worker Container App uses its managed identity to scale from the Service
 Bus queue and consume messages. After deployment, create its SQL database user
 and grant database roles using [sql/schema.sql](sql/schema.sql); that SQL

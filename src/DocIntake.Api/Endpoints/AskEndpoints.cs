@@ -12,12 +12,21 @@ public static class AskEndpoints
     private static async Task<IResult> AskAsync(
         AskRequest request,
         IRagService rag,
+        IConfiguration configuration,
         ILogger<Program> logger,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.Question))
         {
             return Results.BadRequest(new { error = "Question cannot be empty." });
+        }
+
+        if (!configuration.GetValue("OpenAI:ChatEnabled", true))
+        {
+            logger.LogWarning("Question rejected because chat is disabled by configuration");
+            return Results.Json(
+                new { error = "Chat is disabled for this environment." },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
         logger.LogInformation("Received question (length {QuestionLength})", request.Question.Length);

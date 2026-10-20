@@ -182,7 +182,10 @@ resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
 }
 
 // Sprint 4: chat model for the RAG endpoint (/ask). Capacity intentionally modest to start.
-@description('Chat deployment SKU. Must match embeddingSkuName.')
+@description('Deploy the chat model and enable /ask. Disable when chat quota is unavailable; embeddings remain enabled.')
+param deployChat bool = true
+
+@description('Chat deployment SKU; independent of embeddingSkuName.')
 param chatSkuName string = 'Standard'
 
 @description('Chat model deployment capacity in thousands of tokens per minute.')
@@ -200,7 +203,7 @@ param budgetNotificationEmail string = ''
 param budgetStartDate string = utcNow('yyyy-MM-01')
 
 var chatDeploymentName = 'gpt-4o'
-resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2026-09-01' = {
+resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2026-09-01' = if (deployChat) {
   parent: openAi
   name: chatDeploymentName
   sku: {
@@ -546,7 +549,11 @@ module api 'modules/containerApp.bicep' = {
       }
       {
         name: 'OpenAI__ChatDeployment'
-        value: chatDeployment.name
+        value: deployChat ? chatDeploymentName : ''
+      }
+      {
+        name: 'OpenAI__ChatEnabled'
+        value: deployChat ? 'true' : 'false'
       }
       {
         name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
@@ -903,7 +910,7 @@ output extractorName string = extractor.name
 output searchEndpoint string = 'https://${search.name}.search.windows.net'
 output openAiEndpoint string = openAi.properties.endpoint
 output embeddingDeploymentName string = embeddingDeployment.name
-output chatDeploymentName string = chatDeployment.name
+output chatDeploymentName string = deployChat ? chatDeploymentName : ''
 output sqlServerFqdn string = sqlServer.properties.fullyQualifiedDomainName
 output sqlDatabaseName string = sqlDatabase.name
 output workerPrincipalId string = !empty(workerImage) ? worker.outputs.principalId : ''
