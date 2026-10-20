@@ -386,7 +386,8 @@ serviceBusNamespace, documentIntelligenceEndpoint, and extractorName.
 
 The [azure-pipelines.yml](infra/azure-pipelines.yml) pipeline is the deployment
 entrypoint. It builds and tests the solution, provisions the Bicep resources,
-builds the API and Worker images in ACR, deploys the Extractor package, and only
+builds the API and Worker images with Docker on the pipeline agent and pushes
+them to ACR, deploys the Extractor package, and only
 then enables the Event Grid subscription.
 
 Configure these Azure DevOps pipeline variables before running it:
@@ -414,7 +415,14 @@ pipeline does not delete existing apps or plans.
 The service connection identity needs permission to create/update the resources
 in `main.bicep` and create role assignments (for example, Contributor plus
 Role Based Access Control Administrator at the resource-group scope). It also
-needs permission to submit ACR builds. Ensure
+needs `AcrPush` on the registry (or inherited from the resource group) for an
+RBAC-mode registry. If registry repository ABAC permissions are enabled, use the
+appropriate Container Registry Repository Writer assignment instead. The
+pipeline authenticates Docker with `az acr login` using the service connection;
+ACR admin credentials and ACR Tasks are not required. Microsoft-hosted
+`ubuntu-latest` agents provide Docker; self-hosted agents must have a running
+Linux-container Docker daemon. This avoids subscription restrictions such as
+`TasksOperationsNotAllowed` from `az acr build`. Ensure
 [main.bicepparam](infra/main.bicepparam) contains valid environment values,
 including the API Entra authority/audience, SQL administrator group name and
 object ID, and local Worker principal ID. Do not leave placeholders in required

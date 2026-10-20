@@ -46,17 +46,22 @@ registry_server="$(az acr show --name "$registry_name" --query loginServer -o ts
 api_image="${registry_server}/docintake-api:${BUILD_ID}"
 worker_image="${registry_server}/docintake-worker:${BUILD_ID}"
 
+docker info > /dev/null
+az acr login --name "$registry_name"
+
 echo "Building API image $api_image..."
-az acr build \
-  --registry "$registry_name" \
-  --image "docintake-api:${BUILD_ID}" \
+docker build \
+  --tag "$api_image" \
   --file src/DocIntake.Api/Dockerfile .
 
 echo "Building Worker image $worker_image..."
-az acr build \
-  --registry "$registry_name" \
-  --image "docintake-worker:${BUILD_ID}" \
+docker build \
+  --tag "$worker_image" \
   --file src/DocIntake.Worker/Dockerfile .
+
+echo "Pushing images to $registry_server..."
+docker push "$api_image"
+docker push "$worker_image"
 
 deployment_name="docintake-apps-${BUILD_ID}"
 echo "Previewing API, Worker, and Extractor infrastructure..."
