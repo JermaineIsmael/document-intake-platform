@@ -196,6 +196,9 @@ param monthlyBudgetAmount int = 50
 @description('Email address to receive budget notifications.')
 param budgetNotificationEmail string = ''
 
+@description('Start date for the monthly budget period.')
+param budgetStartDate string = utcNow('yyyy-MM-01')
+
 var chatDeploymentName = 'gpt-4o'
 resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2026-09-01' = {
   parent: openAi
@@ -651,7 +654,7 @@ resource eventGridDeadLetterRole 'Microsoft.Authorization/roleAssignments@2022-0
 // disableLocalAuth on Search, its key-management actions grant no data access.
 // SQL access is not Azure RBAC: it comes from Entra admin-group membership (local) or the contained
 // database user created by sql/schema.sql (Sprint 4 managed identity).
-resource workerSearchIndexDataContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource localWorkerSearchIndexDataContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(search.id, workerPrincipalId, searchIndexDataContributorRoleId)
   scope: search
   properties: {
@@ -661,7 +664,7 @@ resource workerSearchIndexDataContributor 'Microsoft.Authorization/roleAssignmen
   }
 }
 
-resource workerSearchServiceContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource localWorkerSearchServiceContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(search.id, workerPrincipalId, searchServiceContributorRoleId)
   scope: search
   properties: {
@@ -671,7 +674,7 @@ resource workerSearchServiceContributor 'Microsoft.Authorization/roleAssignments
   }
 }
 
-resource workerOpenAiUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource localWorkerOpenAiUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(openAi.id, workerPrincipalId, cognitiveServicesOpenAiUserRoleId)
   scope: openAi
   properties: {
@@ -681,7 +684,7 @@ resource workerOpenAiUser 'Microsoft.Authorization/roleAssignments@2022-04-01' =
   }
 }
 
-resource workerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource localWorkerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(serviceBus.id, workerPrincipalId, serviceBusDataReceiverRoleId)
   scope: serviceBus
   properties: {
@@ -702,6 +705,7 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
     registryServer: registry.properties.loginServer
     image: workerImage
     external: false
+    ingressEnabled: false
     minReplicas: 0
     maxReplicas: 5
     envVars: [
@@ -744,12 +748,8 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
             queueName: extractedDocuments.name
             messageCount: '10'
             cloud: 'AzurePublicCloud'
+            useManagedIdentity: 'true'
           }
-          auth: [
-            {
-              secretRef: 'service-bus-connection'
-            }
-          ]
         }
       }
     ]
@@ -840,7 +840,7 @@ resource budget 'Microsoft.Consumption/budgets@2021-10-01' = if (monthlyBudgetAm
     amount: monthlyBudgetAmount
     timeGrain: 'Monthly'
     timePeriod: {
-      startDate: utcNow('yyyy-MM-01')
+      startDate: budgetStartDate
       endDate: '2099-12-31'
     }
     filter: {

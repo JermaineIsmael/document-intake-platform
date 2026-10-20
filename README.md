@@ -371,13 +371,52 @@ context.
   dead-letter container only, solely to write exhausted events.
 
 The container app module accepts name, location, environmentId, registryServer,
-image, external, minReplicas, maxReplicas, envVars, and secrets. `envVars` is an
+image, external, ingressEnabled, minReplicas, maxReplicas, envVars, and secrets. `ingressEnabled`
+defaults to true for the API and is false for the background Worker, which has
+no ingress or HTTP probes. `envVars` is an
 array of `{ name, value }` or `{ name, secretRef }` objects. `secrets` is a secure
 object wrapping an array as `{ values: [{ name, value }] }` (empty by default),
 since ARM cannot represent a secure array parameter. The module outputs principalId and
 fqdn, serves HTTPS ingress on port 8080, and uses TCP startup/liveness/readiness
 probes. The main deployment outputs apiFqdn, acrName, storageName,
 serviceBusNamespace, documentIntelligenceEndpoint, and extractorName.
+
+### Deploy with Azure Pipelines
+
+The [azure-pipelines.yml](infra/azure-pipelines.yml) pipeline is the deployment
+entrypoint. It builds and tests the solution, provisions the Bicep resources,
+builds the API and Worker images in ACR, deploys the Extractor package, and only
+then enables the Event Grid subscription.
+
+Configure these Azure DevOps pipeline variables before running it:
+
+- `azureServiceConnection`: the name of an Azure Resource Manager service
+  connection scoped to the target subscription.
+- `resourceGroup`: the target resource group.
+
+When creating the Azure DevOps pipeline, select the YAML path
+`infra/azure-pipelines.yml`. Create the target resource group before the first
+run.
+
+The service connection identity needs permission to create/update the resources
+in `main.bicep` and create role assignments (for example, Contributor plus
+Role Based Access Control Administrator at the resource-group scope). It also
+needs permission to submit ACR builds. Ensure
+[main.bicepparam](infra/main.bicepparam) contains valid environment values,
+including the API Entra authority/audience, SQL administrator group name and
+object ID, and local Worker principal ID. Do not leave placeholders in required
+parameters.
+
+For the **first run only**, queue the pipeline with
+`provisionInfrastructure=true`. This creates the base resources and ACR, then
+deploys all three projects. For normal releases, leave it false: the pipeline
+expects the resource group to contain the infrastructure and exactly one ACR.
+Image tags use the Azure DevOps build ID.
+
+The Worker Container App uses its managed identity to scale from the Service
+Bus queue and consume messages. After deployment, create its SQL database user
+and grant database roles using [sql/schema.sql](sql/schema.sql); that SQL
+operation is not performed by the pipeline.
 
 ### 1. Prepare
 

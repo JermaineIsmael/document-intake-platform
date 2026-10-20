@@ -28,6 +28,7 @@ param environmentId string
 param registryServer string
 param image string
 param external bool
+param ingressEnabled bool = true
 
 @minValue(0)
 param minReplicas int = 0
@@ -58,12 +59,12 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
     managedEnvironmentId: environmentId
     configuration: {
       activeRevisionsMode: 'Single'
-      ingress: {
+      ingress: ingressEnabled ? {
         external: external
         targetPort: 8080
         transport: 'auto'
         allowInsecure: false
-      }
+      } : null
       registries: [
         {
           server: registryServer
@@ -75,14 +76,14 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
     template: {
       containers: [
         {
-          name: 'api'
+          name: 'app'
           image: image
           env: envVars
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
           }
-          probes: [
+          probes: ingressEnabled ? [
             {
               type: 'Startup'
               tcpSocket: {
@@ -108,7 +109,7 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
               periodSeconds: 5
               failureThreshold: 3
             }
-          ]
+          ] : []
         }
       ]
       scale: {

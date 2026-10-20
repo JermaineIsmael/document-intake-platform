@@ -5,14 +5,16 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 COPY . .
 
-# Restore and build; warnings are treated as errors for production quality.
-RUN dotnet build --configuration Release --warnaserror
+# Restore and build only the Worker project and its project references.
+RUN dotnet build src/DocIntake.Worker/DocIntake.Worker.csproj \
+    --configuration Release \
+    --warnaserror
 
 # Stage 2: Publish (output ready for execution)
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS publish
 WORKDIR /src
 COPY --from=build /src .
-RUN dotnet publish DocIntake.Worker.csproj \
+RUN dotnet publish src/DocIntake.Worker/DocIntake.Worker.csproj \
     --configuration Release \
     --no-build \
     --output /app/publish

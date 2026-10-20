@@ -1,0 +1,74 @@
+trigger:
+  branches:
+    include:
+      - main
+
+parameters:
+  - name: provisionInfrastructure
+    displayName: Bootstrap an empty resource group (first run only)
+    type: boolean
+    default: false
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - task: UseDotNet@2
+    displayName: Install .NET 8 SDK
+    inputs:
+      packageType: sdk
+      version: 8.0.x
+
+  - script: |
+      dotnet build DocIntake.sln --configuration Release --warnaserror
+      dotnet test DocIntake.sln --configuration Release --no-build
+    displayName: Build and test solution
+
+  - task: AzureCLI@2
+    displayName: Provision infrastructure and deploy API and Worker images
+    inputs:
+      azureSubscription: $(azureServiceConnection)
+      scriptType: bash
+      scriptLocation: scriptPath
+      scriptPath: scripts/deploy-azure.sh
+      workingDirectory: $(Build.SourcesDirectory)
+    env:
+      RESOURCE_GROUP: $(resourceGroup)
+      BUILD_ID: $(Build.BuildId)
+      PROVISION_INFRASTRUCTURE: ${{ parameters.provisionInfrastructure }}
+
+  - task: DotNetCoreCLI@2
+    displayName: Publish Extractor
+    inputs:
+      command: publish
+      publishWebProjects: false
+      projects: src/DocIntake.Extractor/DocIntake.Extractor.csproj
+      arguments: >-
+        --configuration Release
+        --output $(Build.ArtifactStagingDirectory)/extractor-publish
+      zipAfterPublish: false
+
+  - task: ArchiveFiles@2
+    displayName: Package Extractor
+    inputs:
+      rootFolderOrFile: $(Build.ArtifactStagingDirectory)/extractor-publish
+      includeRootFolder: false
+      archiveType: zip
+      archiveFile: $(Build.ArtifactStagingDirectory)/extractor.zip
+      replaceExistingArchive: true
+
+  - task: AzureCLI@2
+    displayName: Deploy Extractor and enable Event Grid
+    inputs:
+      azureSubscription: $(azureServiceConnection)
+      scriptType: bash
+      scriptLocation: scriptPath
+      scriptPath: scripts/deploy-extractor.sh
+      workingDirectory: $(Build.SourcesDirectory)
+    env:
+      RESOURCE_GROUP: $(resourceGroup)
+      BUILD_ID: $(Build.BuildId)
+      EXTRACTOR_NAME: $(extractorName)
+      API_IMAGE: $(apiImage)
+      WORKER_IMAGE: $(workerImage)
+      EXTRACTOR_PACKAGE: $(Build.ArtifactStagingDirectory)/extractor.zip
