@@ -1,8 +1,8 @@
 using './main.bicep'
 
 param env = 'dev'
-param authAuthority = 'https://login.microsoftonline.com/e0793d39-0939-496d-b129-198edd916feb/v2.0'
-param authAudience = '<api-client-id>'
+param authAuthority = 'https://login.microsoftonline.com/b27b01b0-cd17-40c7-9469-e55b41387f1b/v2.0'
+param authAudience = 'e88b2c02-bf33-49d5-9e65-9f6bbdbb6bf6'
 param bootstrap = true
 param bootstrapExtractor = true
 // Sprint 4: Worker image deployment (omit or leave empty to skip Worker deployment during development/testing).
