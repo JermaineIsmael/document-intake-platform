@@ -436,9 +436,14 @@ details, and up to 100 system log entries. System log collection is limited to
 60 seconds per app. Unavailable diagnostics produce warnings without replacing
 the original deployment failure exit code.
 
-This environment sets `sqlLocation = 'westus2'` independently of other resource
-locations. Validate SQL provisioning availability for the subscription before
-deployment; selecting this region does not guarantee capacity. Local Worker
+This environment sets `sqlLocation = 'westus3'` independently of other resource
+locations and `sqlServerNameOverride = 'di-docintake-dev-sql-wus3-20261021'` to
+validate a fresh SQL server name without attempting to relocate the previous
+server. Both are candidates: validate regional provisioning access and global
+name availability before deployment. An empty `sqlServerNameOverride` preserves
+the original generated name. Changing the override creates a different server;
+it does not migrate databases or delete the old server. Worker SQL connection
+settings and the SQL server FQDN output follow the selected name. Local Worker
 role assignments and chat remain disabled through `enableLocalWorkerAccess`
 and `deployChat`.
 

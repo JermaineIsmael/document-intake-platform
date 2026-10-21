@@ -56,6 +56,9 @@ param sqlAdminGroupObjectId string
 @description('Region for the SQL server and database. Select a region that permits SQL provisioning for this subscription.')
 param sqlLocation string = location
 
+@description('Optional globally unique SQL server name. Empty preserves the generated name.')
+param sqlServerNameOverride string = ''
+
 @description('Grant development identities Worker roles. Not required for the deployed Worker managed identity.')
 param enableLocalWorkerAccess bool = true
 
@@ -83,7 +86,7 @@ var documentIntelligenceName = 'di${env}${suffix}di'
 var searchName = '${prefix}-search'
 var openAiName = 'di${env}${suffix}oai'
 var embeddingDeploymentName = 'text-embedding-3-small'
-var sqlServerName = '${prefix}-sql'
+var sqlServerName = empty(sqlServerNameOverride) ? '${prefix}-sql' : sqlServerNameOverride
 var sqlDatabaseName = 'docintake'
 var blobContributorRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
 var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
