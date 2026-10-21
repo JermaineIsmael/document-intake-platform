@@ -676,8 +676,8 @@ resource extractorDocumentIntelligenceUser 'Microsoft.Authorization/roleAssignme
 }
 
 resource eventGridDeadLetterRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(eventGridDeadLetter.id, eventGridTopic.name, blobContributorRoleId)
-  scope: eventGridDeadLetter
+  name: guid(storage.id, eventGridTopic.name, blobContributorRoleId)
+  scope: storage
   properties: {
     roleDefinitionId: blobContributorRoleId
     principalId: eventGridTopic.identity.principalId

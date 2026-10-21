@@ -410,6 +410,14 @@ After ZIP deployment, the pipeline polls the ARM site's `properties.state`
 and waits for `ExtractDocument` to be indexed, for up to 30 attempts with
 10-second intervals. A missing or non-Running state is not treated as ready.
 Event Grid remains disabled if readiness times out or an Azure CLI check fails.
+Event Grid's system-topic identity receives Storage Blob Data Contributor on
+the storage account for dead-letter authorization validation, not just on the
+`eventgrid-deadletter` container. This grants blob access across that account;
+the subscription still writes dead letters to the private dead-letter container.
+The subscription depends on the role assignment, but new RBAC permissions may
+take time to propagate. After a first-run authorization failure, verify the
+account-scoped assignment and retry once permissions have propagated.
+Incremental deployments do not remove a previous container-scoped assignment.
 The Extractor pins `Microsoft.ApplicationInsights.WorkerService` to 2.23.0
 to match the Application Insights 2.x components used by the Functions
 Application Insights integration. Upgrading it to 3.x independently can cause
