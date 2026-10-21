@@ -10,6 +10,7 @@ type scaleRule = {
   name: string
   custom: {
     type: string
+    identity: string?
     metadata: object
     auth: {
       secretRef: string

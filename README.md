@@ -464,7 +464,10 @@ After obtaining quota, set `deployChat = true` and redeploy with the desired
 created model deployment in an incremental deployment or reclaim its quota.
 
 The Worker Container App uses its managed identity to scale from the Service
-Bus queue and consume messages. After deployment, create its SQL database user
+Bus queue via `custom.identity = 'system'` on the scale rule, not a
+`useManagedIdentity` metadata property. The identity requires the existing
+Azure Service Bus Data Receiver role assignment.
+After deployment, create its SQL database user
 and grant database roles using [sql/schema.sql](sql/schema.sql); that SQL
 operation is not performed by the pipeline.
 

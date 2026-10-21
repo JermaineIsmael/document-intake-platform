@@ -785,12 +785,12 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
         name: 'service-bus-scale'
         custom: {
           type: 'azure-servicebus'
+          identity: 'system'
           metadata: {
             namespace: serviceBusNamespaceName
             queueName: extractedDocuments.name
             messageCount: '10'
             cloud: 'AzurePublicCloud'
-            useManagedIdentity: 'true'
           }
         }
       }
