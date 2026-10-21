@@ -8,10 +8,10 @@ param bootstrapExtractor = true
 // Sprint 4: Worker image deployment (omit or leave empty to skip Worker deployment during development/testing).
 // Example: 'acr.azurecr.io/docintake-worker:latest'
 param workerImage = ''
-param sqlAdminGroupName = 'sqlAdmin'
+param sqlAdminGroupName = 'DocIntake-Sql-Admins'
 // Placeholder only (deployment fails until replaced). Get the real value with:
 // az ad group show --group <name> --query id -o tsv
-param sqlAdminGroupObjectId = 'b289bbca-0224-4517-8d7d-9d3692a12d01'
+param sqlAdminGroupObjectId = 'bfb28293-869e-4c78-85be-b85138312aa9'
 // Sprint 3 local development only: your own Entra user object ID, which runs the worker locally.
 // az ad signed-in-user show --query id -o tsv
 // Sprint 4 replaces this with the worker Container App's managed identity.
