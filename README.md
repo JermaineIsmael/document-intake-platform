@@ -1179,7 +1179,10 @@ answering free-form questions over indexed content via Azure OpenAI chat.
    In production, prefer direct RBAC on Search service; Key Vault secret access is optional.
 
 3. **Worker Docker image** — [Dockerfile](src/DocIntake.Worker/Dockerfile) multi-stage build
-   (SDK → publish → minimal ASP.NET Core runtime), non-root user, no exposed HTTP ports.
+   (SDK → publish → .NET runtime), non-root user, no exposed HTTP ports.
+   The publish stage inherits the build stage so `--no-build` can reuse both
+   build outputs and the restored NuGet package cache. Only published files
+   are copied into the runtime image.
 
 4. **Worker Container App deployment** — `main.bicep` conditionally deploys the Worker
    if the `workerImage` parameter is non-empty. The Worker:
