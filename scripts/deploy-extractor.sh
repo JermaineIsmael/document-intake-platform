@@ -23,18 +23,21 @@ az functionapp deployment source config-zip \
   --build-remote false \
   --timeout 1800
 
-state="$(az functionapp show \
-  --resource-group "$RESOURCE_GROUP" \
-  --name "$EXTRACTOR_NAME" \
-  --query state \
-  -o tsv)"
-if [[ "$state" != "Running" ]]; then
-  echo "Extractor Function App is not running (state: $state)." >&2
-  exit 1
-fi
-
 function_found=false
 for attempt in $(seq 1 30); do
+  state="$(az resource show \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$EXTRACTOR_NAME" \
+    --resource-type Microsoft.Web/sites \
+    --api-version 2024-04-01 \
+    --query properties.state \
+    -o tsv)"
+  if [[ "$state" != "Running" ]]; then
+    echo "Waiting for Extractor Function App to report Running (state: ${state:-not returned}; attempt $attempt/30)..."
+    sleep 10
+    continue
+  fi
+
   functions="$(az functionapp function list \
     --resource-group "$RESOURCE_GROUP" \
     --name "$EXTRACTOR_NAME" \
@@ -49,7 +52,7 @@ for attempt in $(seq 1 30); do
 done
 
 if [[ "$function_found" != "true" ]]; then
-  echo "ExtractDocument was not indexed; Event Grid will remain disabled." >&2
+  echo "Extractor readiness timed out (state: ${state:-not returned}): the app must report Running and ExtractDocument must be indexed; Event Grid will remain disabled." >&2
   exit 1
 fi
 

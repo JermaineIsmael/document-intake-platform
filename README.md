@@ -406,6 +406,10 @@ Its system-assigned identity uses the existing Storage Blob Data Owner
 assignment for host storage and deployment packages. The pipeline archives
 published files directly at the ZIP root and uses Azure CLI's Flex-aware
 `config-zip` command without remote build (One Deploy).
+After ZIP deployment, the pipeline polls the ARM site's `properties.state`
+and waits for `ExtractDocument` to be indexed, for up to 30 attempts with
+10-second intervals. A missing or non-Running state is not treated as ready.
+Event Grid remains disabled if readiness times out or an Azure CLI check fails.
 Verify Flex Consumption availability and regional memory quota before deployment;
 FC1 removes the Y1 quota dependency but has its own quotas. Existing Y1 plans/apps
 cannot be converted by simply redeploying this template: use a supported migration
@@ -820,8 +824,9 @@ Push-Location src\DocIntake.Extractor
 func azure functionapp publish $extractorName --dotnet-isolated
 Pop-Location
 
-$state = az functionapp show --name $extractorName --resource-group $resourceGroup `
-  --query state -o tsv
+$state = az resource show --name $extractorName --resource-group $resourceGroup `
+  --resource-type Microsoft.Web/sites --api-version 2024-04-01 `
+  --query properties.state -o tsv
 if ($LASTEXITCODE -ne 0 -or $state -ne 'Running') {
     throw "Extractor Function App is not running (state: $state)."
 }
