@@ -53,6 +53,12 @@ param sqlAdminGroupName string
 @maxLength(36)
 param sqlAdminGroupObjectId string
 
+@description('Region for the SQL server and database. Select a region that permits SQL provisioning for this subscription.')
+param sqlLocation string = location
+
+@description('Grant development identities Worker roles. Not required for the deployed Worker managed identity.')
+param enableLocalWorkerAccess bool = true
+
 // LOCAL DEVELOPMENT PLACEHOLDER: in Sprint 3 the worker runs on a developer machine, so this is your
 // own Entra user object ID (az ad signed-in-user show --query id -o tsv). In Sprint 4 these worker
 // role assignments must be redone against the worker Container App's system-assigned managed identity.
@@ -72,7 +78,7 @@ var suffix = uniqueString(resourceGroup().id, env)
 var prefix = 'di-${env}-${suffix}'
 var apiName = '${prefix}-api'
 var extractorName = 'di${env}${suffix}extractor'
-var serviceBusNamespaceName = '${prefix}-sb'
+var serviceBusNamespaceName = '${prefix}-messaging'
 var documentIntelligenceName = 'di${env}${suffix}di'
 var searchName = '${prefix}-search'
 var openAiName = 'di${env}${suffix}oai'
@@ -224,7 +230,7 @@ resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2026-0
 // member of it to connect as admin and run sql/schema.sql.
 resource sqlServer 'Microsoft.Sql/servers@2025-01-01' = {
   name: sqlServerName
-  location: location
+  location: sqlLocation
   properties: {
     minimalTlsVersion: '1.2'
     publicNetworkAccess: 'Enabled'
@@ -242,7 +248,7 @@ resource sqlServer 'Microsoft.Sql/servers@2025-01-01' = {
 resource sqlDatabase 'Microsoft.Sql/servers/databases@2025-01-01' = {
   parent: sqlServer
   name: sqlDatabaseName
-  location: location
+  location: sqlLocation
   sku: {
     name: 'Basic'
     tier: 'Basic'
@@ -682,7 +688,7 @@ resource eventGridDeadLetterRole 'Microsoft.Authorization/roleAssignments@2022-0
 // disableLocalAuth on Search, its key-management actions grant no data access.
 // SQL access is not Azure RBAC: it comes from Entra admin-group membership (local) or the contained
 // database user created by sql/schema.sql (Sprint 4 managed identity).
-resource localWorkerSearchIndexDataContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource localWorkerSearchIndexDataContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableLocalWorkerAccess) {
   name: guid(search.id, workerPrincipalId, searchIndexDataContributorRoleId)
   scope: search
   properties: {
@@ -692,7 +698,7 @@ resource localWorkerSearchIndexDataContributor 'Microsoft.Authorization/roleAssi
   }
 }
 
-resource localWorkerSearchServiceContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource localWorkerSearchServiceContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableLocalWorkerAccess) {
   name: guid(search.id, workerPrincipalId, searchServiceContributorRoleId)
   scope: search
   properties: {
@@ -702,7 +708,7 @@ resource localWorkerSearchServiceContributor 'Microsoft.Authorization/roleAssign
   }
 }
 
-resource localWorkerOpenAiUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource localWorkerOpenAiUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableLocalWorkerAccess) {
   name: guid(openAi.id, workerPrincipalId, cognitiveServicesOpenAiUserRoleId)
   scope: openAi
   properties: {
@@ -712,7 +718,7 @@ resource localWorkerOpenAiUser 'Microsoft.Authorization/roleAssignments@2022-04-
   }
 }
 
-resource localWorkerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource localWorkerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableLocalWorkerAccess) {
   name: guid(serviceBus.id, workerPrincipalId, serviceBusDataReceiverRoleId)
   scope: serviceBus
   properties: {

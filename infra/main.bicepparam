@@ -17,6 +17,7 @@ param sqlAdminGroupObjectId = 'bfb28293-869e-4c78-85be-b85138312aa9'
 // Sprint 4 replaces this with the worker Container App's managed identity.
 param workerPrincipalId = 'b289bbca-0224-4517-8d7d-9d3692a12d01'
 param workerPrincipalType = 'User'
+param enableLocalWorkerAccess = false
 // Sprint 4: chat model deployment configuration
 // Chat quota is currently zero; ingestion and embeddings can deploy independently.
 param deployChat = false
