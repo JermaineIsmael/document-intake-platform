@@ -410,6 +410,10 @@ After ZIP deployment, the pipeline polls the ARM site's `properties.state`
 and waits for `ExtractDocument` to be indexed, for up to 30 attempts with
 10-second intervals. A missing or non-Running state is not treated as ready.
 Event Grid remains disabled if readiness times out or an Azure CLI check fails.
+The Extractor pins `Microsoft.ApplicationInsights.WorkerService` to 2.23.0
+to match the Application Insights 2.x components used by the Functions
+Application Insights integration. Upgrading it to 3.x independently can cause
+an `ITelemetryInitializer` type-load failure before functions are indexed.
 Verify Flex Consumption availability and regional memory quota before deployment;
 FC1 removes the Y1 quota dependency but has its own quotas. Existing Y1 plans/apps
 cannot be converted by simply redeploying this template: use a supported migration
