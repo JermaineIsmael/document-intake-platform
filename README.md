@@ -431,7 +431,7 @@ parameters.
 The API explicitly sets `ASPNETCORE_URLS=http://+:8080` so the bootstrap sample
 and the production API use the same listener as ingress and TCP health probes.
 If either infrastructure deployment fails, the pipeline prints failed ARM
-operations (including the nested API deployment), API revision provisioning
+operations (including the nested API and Worker deployments), API/Worker revision provisioning
 details, and up to 100 system log entries. System log collection is limited to
 60 seconds per app. Unavailable diagnostics produce warnings without replacing
 the original deployment failure exit code.

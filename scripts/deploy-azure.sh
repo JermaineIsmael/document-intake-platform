@@ -17,7 +17,7 @@ az bicep install
 
 report_failed_deployment() {
   local deployment="$1"
-  local apps app
+  local apps app nested_deployment
 
   echo "Failed ARM operations for deployment '$deployment':" >&2
   az deployment operation group list \
@@ -27,23 +27,25 @@ report_failed_deployment() {
     --output json \
     || echo "Warning: could not retrieve failed ARM operations for '$deployment'." >&2
 
-  echo "Failed ARM operations for nested API deployment:" >&2
-  az deployment operation group list \
-    --resource-group "$RESOURCE_GROUP" \
-    --name docintake-api \
-    --query "[?properties.provisioningState=='Failed'].{Resource:properties.targetResource.id,Error:properties.statusMessage}" \
-    --output json \
-    || echo "Warning: could not retrieve nested API deployment operations." >&2
+  for nested_deployment in docintake-api docintake-worker; do
+    echo "Failed ARM operations for nested deployment '$nested_deployment':" >&2
+    az deployment operation group list \
+      --resource-group "$RESOURCE_GROUP" \
+      --name "$nested_deployment" \
+      --query "[?properties.provisioningState=='Failed'].{Resource:properties.targetResource.id,Error:properties.statusMessage}" \
+      --output json \
+      || echo "Warning: could not retrieve operations for '$nested_deployment'." >&2
+  done
 
   if ! apps="$(az containerapp list \
     --resource-group "$RESOURCE_GROUP" \
-    --query "[?ends_with(name, '-api')].name" --output tsv)"; then
-    echo "Warning: could not discover API Container Apps for diagnostics." >&2
+    --query "[?ends_with(name, '-api') || ends_with(name, '-worker')].name" --output tsv)"; then
+    echo "Warning: could not discover API/Worker Container Apps for diagnostics." >&2
     return 0
   fi
 
   if [[ -z "$apps" ]]; then
-    echo "No API Container Apps found; revision diagnostics are unavailable." >&2
+    echo "No API/Worker Container Apps found; revision diagnostics are unavailable." >&2
   fi
 
   while IFS= read -r app; do
