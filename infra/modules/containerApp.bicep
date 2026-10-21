@@ -29,6 +29,7 @@ param registryServer string
 param image string
 param external bool
 param ingressEnabled bool = true
+param registryAuthenticationEnabled bool = true
 
 @minValue(0)
 param minReplicas int = 0
@@ -65,12 +66,12 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
         transport: 'auto'
         allowInsecure: false
       } : null
-      registries: [
+      registries: registryAuthenticationEnabled ? [
         {
           server: registryServer
           identity: 'system'
         }
-      ]
+      ] : []
       secrets: secrets.?values ?? []
     }
     template: {

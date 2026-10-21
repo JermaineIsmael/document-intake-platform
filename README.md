@@ -507,6 +507,12 @@ compile/test success alone does not mean these resources have been deployed.
 
 ### 2. Bootstrap the managed identity and ACR permissions
 
+Bootstrap omits private ACR registry authentication while running the public
+sample image. This lets the API identity provision before its `AcrPull` role
+assignment is created. Final deployments restore system-identity registry
+authentication. Configuring private registry credentials during bootstrap can
+otherwise cause ACR token-exchange HTTP 401 errors and revision timeouts.
+
 A new system identity cannot pull a private image before it exists and has
 AcrPull. The initial deployment therefore uses a public Microsoft ASP.NET sample
 image with **internal-only ingress** (`bootstrap=true`, the default). This is

@@ -509,6 +509,7 @@ module api 'modules/containerApp.bicep' = {
     environmentId: environment.id
     registryServer: registry.properties.loginServer
     image: apiImage
+    registryAuthenticationEnabled: !bootstrap
     external: !bootstrap
     minReplicas: bootstrap ? 0 : 1
     maxReplicas: 3
