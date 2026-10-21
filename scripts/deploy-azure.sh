@@ -15,6 +15,71 @@ fi
 
 az bicep install
 
+report_failed_deployment() {
+  local deployment="$1"
+  local apps app
+
+  echo "Failed ARM operations for deployment '$deployment':" >&2
+  az deployment operation group list \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$deployment" \
+    --query "[?properties.provisioningState=='Failed'].{Resource:properties.targetResource.id,Error:properties.statusMessage}" \
+    --output json \
+    || echo "Warning: could not retrieve failed ARM operations for '$deployment'." >&2
+
+  echo "Failed ARM operations for nested API deployment:" >&2
+  az deployment operation group list \
+    --resource-group "$RESOURCE_GROUP" \
+    --name docintake-api \
+    --query "[?properties.provisioningState=='Failed'].{Resource:properties.targetResource.id,Error:properties.statusMessage}" \
+    --output json \
+    || echo "Warning: could not retrieve nested API deployment operations." >&2
+
+  if ! apps="$(az containerapp list \
+    --resource-group "$RESOURCE_GROUP" \
+    --query "[?ends_with(name, '-api')].name" --output tsv)"; then
+    echo "Warning: could not discover API Container Apps for diagnostics." >&2
+    return 0
+  fi
+
+  if [[ -z "$apps" ]]; then
+    echo "No API Container Apps found; revision diagnostics are unavailable." >&2
+  fi
+
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    echo "Revision provisioning details for '$app':" >&2
+    az containerapp revision list \
+      --resource-group "$RESOURCE_GROUP" --name "$app" \
+      --query "[].{Name:name,Provisioning:properties.provisioningState,Health:properties.healthState,Details:properties.provisioningError}" \
+      --output json \
+      || echo "Warning: could not retrieve revisions for '$app'." >&2
+
+    echo "Recent system logs for '$app':" >&2
+    timeout 60s az containerapp logs show \
+      --resource-group "$RESOURCE_GROUP" --name "$app" \
+      --type system --tail 100 --follow false \
+      || echo "Warning: system log retrieval failed or timed out for '$app'." >&2
+  done <<< "$apps"
+}
+
+deploy_infrastructure() {
+  local deployment="$1"
+  local exit_code
+  shift
+  if az deployment group create \
+    --name "$deployment" \
+    --resource-group "$RESOURCE_GROUP" \
+    "$@"; then
+    return 0
+  else
+    exit_code=$?
+    echo "Infrastructure deployment '$deployment' failed (exit code $exit_code). Collecting diagnostics..." >&2
+    report_failed_deployment "$deployment"
+    exit "$exit_code"
+  fi
+}
+
 if [[ "${provision_infrastructure,,}" == "true" ]]; then
   echo "Previewing initial infrastructure bootstrap..."
   az deployment group what-if \
@@ -22,9 +87,7 @@ if [[ "${provision_infrastructure,,}" == "true" ]]; then
     --parameters "$PARAMETERS_FILE" bootstrap=true bootstrapExtractor=true workerImage=''
 
   echo "Deploying infrastructure bootstrap..."
-  az deployment group create \
-    --name "$BOOTSTRAP_DEPLOYMENT" \
-    --resource-group "$RESOURCE_GROUP" \
+  deploy_infrastructure "$BOOTSTRAP_DEPLOYMENT" \
     --parameters "$PARAMETERS_FILE" bootstrap=true bootstrapExtractor=true workerImage=''
 fi
 
@@ -74,9 +137,7 @@ az deployment group what-if \
     workerImage="$worker_image"
 
 echo "Deploying API, Worker, and Extractor infrastructure..."
-az deployment group create \
-  --name "$deployment_name" \
-  --resource-group "$RESOURCE_GROUP" \
+deploy_infrastructure "$deployment_name" \
   --parameters "$PARAMETERS_FILE" \
     bootstrap=false \
     bootstrapExtractor=true \

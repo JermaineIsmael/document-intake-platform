@@ -522,6 +522,10 @@ module api 'modules/containerApp.bicep' = {
         value: '8080'
       }
       {
+        name: 'ASPNETCORE_URLS'
+        value: 'http://+:8080'
+      }
+      {
         name: 'Development__BypassAuth'
         value: 'false'
       }

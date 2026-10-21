@@ -12,6 +12,7 @@ param sqlAdminGroupName = 'DocIntake-Sql-Admins'
 // Placeholder only (deployment fails until replaced). Get the real value with:
 // az ad group show --group <name> --query id -o tsv
 param sqlAdminGroupObjectId = 'bfb28293-869e-4c78-85be-b85138312aa9'
+param sqlLocation = 'westus2'
 // Sprint 3 local development only: your own Entra user object ID, which runs the worker locally.
 // az ad signed-in-user show --query id -o tsv
 // Sprint 4 replaces this with the worker Container App's managed identity.

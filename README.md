@@ -428,6 +428,20 @@ including the API Entra authority/audience, SQL administrator group name and
 object ID, and local Worker principal ID. Do not leave placeholders in required
 parameters.
 
+The API explicitly sets `ASPNETCORE_URLS=http://+:8080` so the bootstrap sample
+and the production API use the same listener as ingress and TCP health probes.
+If either infrastructure deployment fails, the pipeline prints failed ARM
+operations (including the nested API deployment), API revision provisioning
+details, and up to 100 system log entries. System log collection is limited to
+60 seconds per app. Unavailable diagnostics produce warnings without replacing
+the original deployment failure exit code.
+
+This environment sets `sqlLocation = 'westus2'` independently of other resource
+locations. Validate SQL provisioning availability for the subscription before
+deployment; selecting this region does not guarantee capacity. Local Worker
+role assignments and chat remain disabled through `enableLocalWorkerAccess`
+and `deployChat`.
+
 For the **first run only**, queue the pipeline with
 `provisionInfrastructure=true`. This creates the base resources and ACR, then
 deploys all three projects. For normal releases, leave it false: the pipeline
