@@ -7,7 +7,11 @@ using Azure.Messaging.ServiceBus;
 using Azure.Storage.Blobs;
 using DocIntake.Extractor;
 using FluentAssertions;
+using Microsoft.ApplicationInsights.Extensibility;
+using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -15,6 +19,23 @@ namespace DocIntake.Tests;
 
 public sealed class ExtractorFunctionTests
 {
+    [Fact]
+    public void Functions_telemetry_initializes_with_compatible_application_insights_components()
+    {
+        using var host = new HostBuilder()
+            .ConfigureFunctionsWorkerDefaults()
+            .ConfigureServices(services =>
+            {
+                services.AddApplicationInsightsTelemetryWorkerService();
+                services.ConfigureFunctionsApplicationInsights();
+            })
+            .Build();
+
+        var configuration = host.Services.GetRequiredService<TelemetryConfiguration>();
+
+        configuration.TelemetryInitializers.Should().NotBeEmpty();
+    }
+
     [Fact]
     public async Task Non_blob_created_events_are_ignored()
     {

@@ -11,9 +11,7 @@ RUN dotnet build src/DocIntake.Worker/DocIntake.Worker.csproj \
     --warnaserror
 
 # Stage 2: Publish (output ready for execution)
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS publish
-WORKDIR /src
-COPY --from=build /src .
+FROM build AS publish
 RUN dotnet publish src/DocIntake.Worker/DocIntake.Worker.csproj \
     --configuration Release \
     --no-build \

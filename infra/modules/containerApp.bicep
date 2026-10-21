@@ -10,6 +10,7 @@ type scaleRule = {
   name: string
   custom: {
     type: string
+    identity: string?
     metadata: object
     auth: {
       secretRef: string
@@ -29,6 +30,10 @@ param registryServer string
 param image string
 param external bool
 param ingressEnabled bool = true
+param registryAuthenticationEnabled bool = true
+
+@description('Optional user-assigned identity resource ID for image pulls. Empty uses the system-assigned identity.')
+param registryIdentityResourceId string = ''
 
 @minValue(0)
 param minReplicas int = 0
@@ -53,7 +58,10 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
   name: name
   location: location
   identity: {
-    type: 'SystemAssigned'
+    type: empty(registryIdentityResourceId) ? 'SystemAssigned' : 'SystemAssigned,UserAssigned'
+    userAssignedIdentities: empty(registryIdentityResourceId) ? null : {
+      '${registryIdentityResourceId}': {}
+    }
   }
   properties: {
     managedEnvironmentId: environmentId
@@ -65,12 +73,12 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
         transport: 'auto'
         allowInsecure: false
       } : null
-      registries: [
+      registries: registryAuthenticationEnabled ? [
         {
           server: registryServer
-          identity: 'system'
+          identity: empty(registryIdentityResourceId) ? 'system' : registryIdentityResourceId
         }
-      ]
+      ] : []
       secrets: secrets.?values ?? []
     }
     template: {
@@ -122,4 +130,4 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
 }
 
 output principalId string = app.identity.principalId
-output fqdn string = app.properties.configuration.ingress.fqdn
+output fqdn string = ingressEnabled ? app.properties.configuration.ingress.fqdn : ''

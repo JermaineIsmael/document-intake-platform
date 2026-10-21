@@ -406,6 +406,22 @@ Its system-assigned identity uses the existing Storage Blob Data Owner
 assignment for host storage and deployment packages. The pipeline archives
 published files directly at the ZIP root and uses Azure CLI's Flex-aware
 `config-zip` command without remote build (One Deploy).
+After ZIP deployment, the pipeline polls the ARM site's `properties.state`
+and waits for `ExtractDocument` to be indexed, for up to 30 attempts with
+10-second intervals. A missing or non-Running state is not treated as ready.
+Event Grid remains disabled if readiness times out or an Azure CLI check fails.
+Event Grid's system-topic identity receives Storage Blob Data Contributor on
+the storage account for dead-letter authorization validation, not just on the
+`eventgrid-deadletter` container. This grants blob access across that account;
+the subscription still writes dead letters to the private dead-letter container.
+The subscription depends on the role assignment, but new RBAC permissions may
+take time to propagate. After a first-run authorization failure, verify the
+account-scoped assignment and retry once permissions have propagated.
+Incremental deployments do not remove a previous container-scoped assignment.
+The Extractor pins `Microsoft.ApplicationInsights.WorkerService` to 2.23.0
+to match the Application Insights 2.x components used by the Functions
+Application Insights integration. Upgrading it to 3.x independently can cause
+an `ITelemetryInitializer` type-load failure before functions are indexed.
 Verify Flex Consumption availability and regional memory quota before deployment;
 FC1 removes the Y1 quota dependency but has its own quotas. Existing Y1 plans/apps
 cannot be converted by simply redeploying this template: use a supported migration
@@ -428,6 +444,35 @@ including the API Entra authority/audience, SQL administrator group name and
 object ID, and local Worker principal ID. Do not leave placeholders in required
 parameters.
 
+The API explicitly sets `ASPNETCORE_URLS=http://+:8080` so the bootstrap sample
+and the production API use the same listener as ingress and TCP health probes.
+The Worker attaches a dedicated user-assigned identity named
+`<prefix>-worker-pull` for private ACR image pulls. Its `AcrPull` assignment is
+created before the Worker module runs, avoiding a first-deployment dependency
+on the Worker's system identity becoming available. The system identity remains
+in use for application access, Service Bus scaling, and SQL grants; existing
+system-identity role assignments are preserved. The service connection also
+needs permission to create and assign user-assigned managed identities (included
+in Contributor at the resource-group scope). New RBAC assignments can take time
+to propagate; if image pulls still fail, inspect Worker system logs and verify
+the pull identity's registry role before retrying.
+If either infrastructure deployment fails, the pipeline prints failed ARM
+operations (including the nested API and Worker deployments), API/Worker revision provisioning
+details, and up to 100 system log entries. System log collection is limited to
+60 seconds per app. Unavailable diagnostics produce warnings without replacing
+the original deployment failure exit code.
+
+This environment sets `sqlLocation = 'westus3'` independently of other resource
+locations and `sqlServerNameOverride = 'di-docintake-dev-sql-wus3-20261021'` to
+validate a fresh SQL server name without attempting to relocate the previous
+server. Both are candidates: validate regional provisioning access and global
+name availability before deployment. An empty `sqlServerNameOverride` preserves
+the original generated name. Changing the override creates a different server;
+it does not migrate databases or delete the old server. Worker SQL connection
+settings and the SQL server FQDN output follow the selected name. Local Worker
+role assignments and chat remain disabled through `enableLocalWorkerAccess`
+and `deployChat`.
+
 For the **first run only**, queue the pipeline with
 `provisionInfrastructure=true`. This creates the base resources and ACR, then
 deploys all three projects. For normal releases, leave it false: the pipeline
@@ -445,7 +490,10 @@ After obtaining quota, set `deployChat = true` and redeploy with the desired
 created model deployment in an incremental deployment or reclaim its quota.
 
 The Worker Container App uses its managed identity to scale from the Service
-Bus queue and consume messages. After deployment, create its SQL database user
+Bus queue via `custom.identity = 'system'` on the scale rule, not a
+`useManagedIdentity` metadata property. The identity requires the existing
+Azure Service Bus Data Receiver role assignment.
+After deployment, create its SQL database user
 and grant database roles using [sql/schema.sql](sql/schema.sql); that SQL
 operation is not performed by the pipeline.
 
@@ -492,6 +540,12 @@ Compiled JSON is ignored by Git. Azure deployment creates billable resources;
 compile/test success alone does not mean these resources have been deployed.
 
 ### 2. Bootstrap the managed identity and ACR permissions
+
+Bootstrap omits private ACR registry authentication while running the public
+sample image. This lets the API identity provision before its `AcrPull` role
+assignment is created. Final deployments restore system-identity registry
+authentication. Configuring private registry credentials during bootstrap can
+otherwise cause ACR token-exchange HTTP 401 errors and revision timeouts.
 
 A new system identity cannot pull a private image before it exists and has
 AcrPull. The initial deployment therefore uses a public Microsoft ASP.NET sample
@@ -782,8 +836,9 @@ Push-Location src\DocIntake.Extractor
 func azure functionapp publish $extractorName --dotnet-isolated
 Pop-Location
 
-$state = az functionapp show --name $extractorName --resource-group $resourceGroup `
-  --query state -o tsv
+$state = az resource show --name $extractorName --resource-group $resourceGroup `
+  --resource-type Microsoft.Web/sites --api-version 2024-04-01 `
+  --query properties.state -o tsv
 if ($LASTEXITCODE -ne 0 -or $state -ne 'Running') {
     throw "Extractor Function App is not running (state: $state)."
 }
@@ -1154,7 +1209,10 @@ answering free-form questions over indexed content via Azure OpenAI chat.
    In production, prefer direct RBAC on Search service; Key Vault secret access is optional.
 
 3. **Worker Docker image** — [Dockerfile](src/DocIntake.Worker/Dockerfile) multi-stage build
-   (SDK → publish → minimal ASP.NET Core runtime), non-root user, no exposed HTTP ports.
+   (SDK → publish → .NET runtime), non-root user, no exposed HTTP ports.
+   The publish stage inherits the build stage so `--no-build` can reuse both
+   build outputs and the restored NuGet package cache. Only published files
+   are copied into the runtime image.
 
 4. **Worker Container App deployment** — `main.bicep` conditionally deploys the Worker
    if the `workerImage` parameter is non-empty. The Worker:

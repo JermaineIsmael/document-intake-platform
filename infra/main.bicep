@@ -56,6 +56,9 @@ param sqlAdminGroupObjectId string
 @description('Region for the SQL server and database. Select a region that permits SQL provisioning for this subscription.')
 param sqlLocation string = location
 
+@description('Optional globally unique SQL server name. Empty preserves the generated name.')
+param sqlServerNameOverride string = ''
+
 @description('Grant development identities Worker roles. Not required for the deployed Worker managed identity.')
 param enableLocalWorkerAccess bool = true
 
@@ -83,7 +86,7 @@ var documentIntelligenceName = 'di${env}${suffix}di'
 var searchName = '${prefix}-search'
 var openAiName = 'di${env}${suffix}oai'
 var embeddingDeploymentName = 'text-embedding-3-small'
-var sqlServerName = '${prefix}-sql'
+var sqlServerName = empty(sqlServerNameOverride) ? '${prefix}-sql' : sqlServerNameOverride
 var sqlDatabaseName = 'docintake'
 var blobContributorRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
 var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
@@ -509,6 +512,7 @@ module api 'modules/containerApp.bicep' = {
     environmentId: environment.id
     registryServer: registry.properties.loginServer
     image: apiImage
+    registryAuthenticationEnabled: !bootstrap
     external: !bootstrap
     minReplicas: bootstrap ? 0 : 1
     maxReplicas: 3
@@ -520,6 +524,10 @@ module api 'modules/containerApp.bicep' = {
       {
         name: 'ASPNETCORE_HTTP_PORTS'
         value: '8080'
+      }
+      {
+        name: 'ASPNETCORE_URLS'
+        value: 'http://+:8080'
       }
       {
         name: 'Development__BypassAuth'
@@ -668,8 +676,8 @@ resource extractorDocumentIntelligenceUser 'Microsoft.Authorization/roleAssignme
 }
 
 resource eventGridDeadLetterRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(eventGridDeadLetter.id, eventGridTopic.name, blobContributorRoleId)
-  scope: eventGridDeadLetter
+  name: guid(storage.id, eventGridTopic.name, blobContributorRoleId)
+  scope: storage
   properties: {
     roleDefinitionId: blobContributorRoleId
     principalId: eventGridTopic.identity.principalId
@@ -728,6 +736,22 @@ resource localWorkerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@
   }
 }
 
+resource workerRegistryIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (!empty(workerImage)) {
+  name: '${prefix}-worker-pull'
+  location: location
+}
+
+// Image-pull permissions must exist before provisioning the first private-image revision.
+resource workerRegistryAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(workerImage)) {
+  name: guid(registry.id, workerRegistryIdentity.id, acrPullRoleId)
+  scope: registry
+  properties: {
+    roleDefinitionId: acrPullRoleId
+    principalId: workerRegistryIdentity!.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 // Sprint 4: Deploy the Worker Container App for ingesting chunks from the extracted-documents queue.
 // Only deployed if workerImage is non-empty. Scales 0-5 replicas based on queue depth (KEDA).
 module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
@@ -737,6 +761,7 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
     location: location
     environmentId: environment.id
     registryServer: registry.properties.loginServer
+    registryIdentityResourceId: workerRegistryIdentity.id
     image: workerImage
     external: false
     ingressEnabled: false
@@ -777,27 +802,30 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
         name: 'service-bus-scale'
         custom: {
           type: 'azure-servicebus'
+          identity: 'system'
           metadata: {
             namespace: serviceBusNamespaceName
             queueName: extractedDocuments.name
             messageCount: '10'
             cloud: 'AzurePublicCloud'
-            useManagedIdentity: 'true'
           }
         }
       }
     ]
     secrets: {}
   }
+  dependsOn: [
+    workerRegistryAcrPull
+  ]
 }
 
-// Sprint 4: Grant Worker managed identity ACR pull permission (required for container image pulls).
+// Retain the existing system-identity assignment for compatibility; image pulls use workerRegistryIdentity.
 resource workerAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(workerImage)) {
   name: guid(registry.id, '${prefix}-worker', acrPullRoleId)
   scope: registry
   properties: {
     roleDefinitionId: acrPullRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -808,7 +836,7 @@ resource workerTelemetryPublisher 'Microsoft.Authorization/roleAssignments@2022-
   scope: insights
   properties: {
     roleDefinitionId: telemetryPublisherRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -819,7 +847,7 @@ resource workerSearchIndexDataContributor 'Microsoft.Authorization/roleAssignmen
   scope: search
   properties: {
     roleDefinitionId: searchIndexDataContributorRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -830,7 +858,7 @@ resource workerSearchServiceContributor 'Microsoft.Authorization/roleAssignments
   scope: search
   properties: {
     roleDefinitionId: searchServiceContributorRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -841,7 +869,7 @@ resource workerOpenAiUser 'Microsoft.Authorization/roleAssignments@2022-04-01' =
   scope: openAi
   properties: {
     roleDefinitionId: cognitiveServicesOpenAiUserRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -852,7 +880,7 @@ resource workerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-
   scope: serviceBus
   properties: {
     roleDefinitionId: serviceBusDataReceiverRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -869,7 +897,6 @@ resource workerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-
 resource budget 'Microsoft.Consumption/budgets@2021-10-01' = if (monthlyBudgetAmount > 0 && !empty(budgetNotificationEmail)) {
   name: '${prefix}-monthly-budget'
   properties: {
-    displayName: 'DocIntake Monthly Budget'
     category: 'Cost'
     amount: monthlyBudgetAmount
     timeGrain: 'Monthly'
@@ -919,4 +946,4 @@ output embeddingDeploymentName string = embeddingDeployment.name
 output chatDeploymentName string = deployChat ? chatDeploymentName : ''
 output sqlServerFqdn string = sqlServer.properties.fullyQualifiedDomainName
 output sqlDatabaseName string = sqlDatabase.name
-output workerPrincipalId string = !empty(workerImage) ? worker.outputs.principalId : ''
+output workerPrincipalId string = !empty(workerImage) ? worker!.outputs.principalId : ''
