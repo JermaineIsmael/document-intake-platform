@@ -736,6 +736,22 @@ resource localWorkerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@
   }
 }
 
+resource workerRegistryIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (!empty(workerImage)) {
+  name: '${prefix}-worker-pull'
+  location: location
+}
+
+// Image-pull permissions must exist before provisioning the first private-image revision.
+resource workerRegistryAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(workerImage)) {
+  name: guid(registry.id, workerRegistryIdentity.id, acrPullRoleId)
+  scope: registry
+  properties: {
+    roleDefinitionId: acrPullRoleId
+    principalId: workerRegistryIdentity!.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 // Sprint 4: Deploy the Worker Container App for ingesting chunks from the extracted-documents queue.
 // Only deployed if workerImage is non-empty. Scales 0-5 replicas based on queue depth (KEDA).
 module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
@@ -745,6 +761,7 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
     location: location
     environmentId: environment.id
     registryServer: registry.properties.loginServer
+    registryIdentityResourceId: workerRegistryIdentity.id
     image: workerImage
     external: false
     ingressEnabled: false
@@ -797,15 +814,18 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
     ]
     secrets: {}
   }
+  dependsOn: [
+    workerRegistryAcrPull
+  ]
 }
 
-// Sprint 4: Grant Worker managed identity ACR pull permission (required for container image pulls).
+// Retain the existing system-identity assignment for compatibility; image pulls use workerRegistryIdentity.
 resource workerAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(workerImage)) {
   name: guid(registry.id, '${prefix}-worker', acrPullRoleId)
   scope: registry
   properties: {
     roleDefinitionId: acrPullRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -816,7 +836,7 @@ resource workerTelemetryPublisher 'Microsoft.Authorization/roleAssignments@2022-
   scope: insights
   properties: {
     roleDefinitionId: telemetryPublisherRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -827,7 +847,7 @@ resource workerSearchIndexDataContributor 'Microsoft.Authorization/roleAssignmen
   scope: search
   properties: {
     roleDefinitionId: searchIndexDataContributorRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -838,7 +858,7 @@ resource workerSearchServiceContributor 'Microsoft.Authorization/roleAssignments
   scope: search
   properties: {
     roleDefinitionId: searchServiceContributorRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -849,7 +869,7 @@ resource workerOpenAiUser 'Microsoft.Authorization/roleAssignments@2022-04-01' =
   scope: openAi
   properties: {
     roleDefinitionId: cognitiveServicesOpenAiUserRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -860,7 +880,7 @@ resource workerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-
   scope: serviceBus
   properties: {
     roleDefinitionId: serviceBusDataReceiverRoleId
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -877,7 +897,6 @@ resource workerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-
 resource budget 'Microsoft.Consumption/budgets@2021-10-01' = if (monthlyBudgetAmount > 0 && !empty(budgetNotificationEmail)) {
   name: '${prefix}-monthly-budget'
   properties: {
-    displayName: 'DocIntake Monthly Budget'
     category: 'Cost'
     amount: monthlyBudgetAmount
     timeGrain: 'Monthly'
@@ -927,4 +946,4 @@ output embeddingDeploymentName string = embeddingDeployment.name
 output chatDeploymentName string = deployChat ? chatDeploymentName : ''
 output sqlServerFqdn string = sqlServer.properties.fullyQualifiedDomainName
 output sqlDatabaseName string = sqlDatabase.name
-output workerPrincipalId string = !empty(workerImage) ? worker.outputs.principalId : ''
+output workerPrincipalId string = !empty(workerImage) ? worker!.outputs.principalId : ''

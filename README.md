@@ -430,6 +430,16 @@ parameters.
 
 The API explicitly sets `ASPNETCORE_URLS=http://+:8080` so the bootstrap sample
 and the production API use the same listener as ingress and TCP health probes.
+The Worker attaches a dedicated user-assigned identity named
+`<prefix>-worker-pull` for private ACR image pulls. Its `AcrPull` assignment is
+created before the Worker module runs, avoiding a first-deployment dependency
+on the Worker's system identity becoming available. The system identity remains
+in use for application access, Service Bus scaling, and SQL grants; existing
+system-identity role assignments are preserved. The service connection also
+needs permission to create and assign user-assigned managed identities (included
+in Contributor at the resource-group scope). New RBAC assignments can take time
+to propagate; if image pulls still fail, inspect Worker system logs and verify
+the pull identity's registry role before retrying.
 If either infrastructure deployment fails, the pipeline prints failed ARM
 operations (including the nested API and Worker deployments), API/Worker revision provisioning
 details, and up to 100 system log entries. System log collection is limited to
