@@ -1,10 +1,26 @@
 # DocIntake - document intake platform
 
-This repository contains the Sprint 1 API foundation and the Sprint 2
-blob-to-extraction ingestion pipeline: authenticated uploads, Azure Blob
-Storage, an Event Grid-triggered .NET 8 isolated Function, Azure AI Document
-Intelligence, Application Insights, and a Service Bus queue. There is no queue
-consumer, AI Search, SQL, or `/ask` endpoint.
+This repository implements authenticated document uploads, Blob Storage and
+Event Grid-triggered extraction, and a Service Bus Worker that generates
+embeddings, indexes Azure AI Search, and persists SQL metadata. An optional
+`/ask` RAG endpoint is implemented; chat is disabled in the current development
+environment.
+
+See [Deployment, architecture, and verification](docs/development/deployment-verification.md)
+for the tested outcomes, Azure service inventory, infrastructure configuration,
+known limitations, and remaining tasks as of 22 October 2026.
+
+## Documentation
+
+| Topic | Documents |
+|---|---|
+| Architecture | [Overview](docs/architecture/architecture-overview.md), [component design](docs/architecture/component-design.md), [data flow](docs/architecture/data-flow.md), [security](docs/architecture/security.md), [system context](docs/architecture/system-context.md) |
+| Development | [Coding standards](docs/development/coding-standards.md), [implementation status](docs/development/implementation-status.md), [sprint history](docs/development/sprint-history.md), [testing strategy](docs/development/testing-strategy.md) |
+| Product | [Feature roadmap](docs/product/feature-roadmap.md), [MVP definition](docs/product/mvp-definition.md), [product requirements](docs/product/product-requirement.md), [sprint roadmap](docs/product/sprint-roadmap.md) |
+
+These topic documents distinguish implementation from observed verification
+and proposed work. Full RAG retrieval/answer generation is still incomplete;
+the route and model configuration alone do not provide a working chat feature.
 
 ## Projects
 
@@ -1484,12 +1500,10 @@ dead-letter recovery, end-to-end tracing, load testing, and a security audit.
    - Follow-up SQL query [scripts/test-load-completion.sql](scripts/test-load-completion.sql) to verify indexing
    - Watch for HTTP 429 (throttling) from AI Search or OpenAI during burst
 
-8. **Secrets Audit** ([docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md))
-   - No hardcoded API keys, passwords, or connection strings in source
-   - Managed identity + RBAC used exclusively for Azure service authentication
-   - Storage shared keys disabled; SQL Entra-only auth; all services with `disableLocalAuth: true`
-   - Local settings properly gitignored
-   - Audit passed; system is production-ready from a credential security perspective
+8. **Security documentation**
+   - [Security architecture](docs/architecture/security.md) describes current controls and known boundaries.
+   - [Historical secrets review](docs/development/security-audit.md) summarizes the original review and its evidence limitations.
+   - The historical review is not a current scan or production-readiness approval.
 
 ### Known Limitations
 
