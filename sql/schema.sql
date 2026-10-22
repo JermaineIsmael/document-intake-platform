@@ -19,16 +19,16 @@ GO
 -- Sprint 3: the worker runs locally under YOUR OWN Entra identity (DefaultAzureCredential picks up
 -- az login / Visual Studio). If testing with the admin group account, this section can be skipped;
 -- the admin group already has full access. If testing with a different Entra user, replace
--- <worker-identity-name> with that user's UPN or display name.
+-- di-dev-yoix3ptcm6eqg-worker with that user's UPN or display name.
 --
--- Sprint 4: replace <worker-identity-name> with the worker Container App's system-assigned managed
+-- Sprint 4: replace di-dev-yoix3ptcm6eqg-worker with the worker Container App's system-assigned managed
 -- identity name (set in Bicep as '${prefix}-worker') and run this section once the Container App exists.
 -- The managed identity's display name in Entra ID is typically the Container App resource name.
 -- CREATE USER ... FROM EXTERNAL PROVIDER fails if the identity doesn't exist or the name doesn't match exactly.
-IF DATABASE_PRINCIPAL_ID(N'<worker-identity-name>') IS NULL
+IF DATABASE_PRINCIPAL_ID(N'di-dev-yoix3ptcm6eqg-worker') IS NULL
 BEGIN
-    CREATE USER [<worker-identity-name>] FROM EXTERNAL PROVIDER;
+    CREATE USER [di-dev-yoix3ptcm6eqg-worker] FROM EXTERNAL PROVIDER;
 END;
-ALTER ROLE db_datawriter ADD MEMBER [<worker-identity-name>];
-ALTER ROLE db_datareader ADD MEMBER [<worker-identity-name>];
+ALTER ROLE db_datawriter ADD MEMBER [di-dev-yoix3ptcm6eqg-worker];
+ALTER ROLE db_datareader ADD MEMBER [di-dev-yoix3ptcm6eqg-worker];
 GO

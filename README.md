@@ -2,9 +2,9 @@
 
 This repository implements authenticated document uploads, Blob Storage and
 Event Grid-triggered extraction, and a Service Bus Worker that generates
-embeddings, indexes Azure AI Search, and persists SQL metadata. An optional
-`/ask` RAG endpoint is implemented; chat is disabled in the current development
-environment.
+embeddings, indexes Azure AI Search, and persists SQL metadata. The optional
+`/ask` route exists, but RAG retrieval and answer generation are incomplete;
+chat is disabled in the current development environment.
 
 See [Deployment, architecture, and verification](docs/development/deployment-verification.md)
 for the tested outcomes, Azure service inventory, infrastructure configuration,
@@ -21,6 +21,122 @@ known limitations, and remaining tasks as of 22 October 2026.
 These topic documents distinguish implementation from observed verification
 and proposed work. Full RAG retrieval/answer generation is still incomplete;
 the route and model configuration alone do not provide a working chat feature.
+
+## Feature and task status
+
+Baseline: **22 October 2026**, development environment. This is the current
+summary; the sprint sections below retain implementation history and deployment
+instructions, not proof that every planned sprint outcome was delivered.
+
+- **Implemented**: code, infrastructure, tooling, or documentation exists.
+  This does not automatically mean live verification is complete.
+- **Partial**: a foundation exists, but required behavior or operational work
+  remains.
+- **Not implemented**: the capability or automation is not delivered.
+- Verification tasks use **Complete**, **Pending**, or **Closed by disposition**
+  separately from implementation status.
+
+### API and document ingestion
+
+| Feature / task | Implementation | Current behavior / remaining work |
+|---|---|---|
+| Entra-authenticated API and protected-route fallback policy | Implemented | Valid-token upload and anonymous rejection observed; not per-document authorization |
+| Development-only authentication bypass | Implemented | Requires Development environment and explicit setting; ignored in Staging/Production |
+| Process health endpoints | Implemented | Anonymous `/health` and `/health/live`; not downstream dependency readiness checks |
+| Multipart PDF/DOCX upload validation | Implemented | Exactly one `file`; extension/content checks and configurable limit, default 25 MiB |
+| Asynchronous upload acknowledgement | Implemented | `POST /documents` returns 202 with a new document GUID and queued status |
+| Private original-document storage | Implemented | Originals stored in Blob Storage; upload does not wait for extraction/indexing |
+| Blob-created extraction trigger | Implemented | Event Grid invokes the isolated .NET Extractor Function |
+| Document Intelligence text extraction | Implemented | Extracted text is passed to downstream ingestion |
+| Extracted-text queue messaging | Implemented | Inline shared message through Service Bus; large serialized text can exceed the Standard message limit |
+| Large-text claim-check messaging | Not implemented | Store extracted text privately and queue a validated reference; update contracts, access, compatibility, cleanup, and tests without truncation |
+| Empty-text handling | Partial | Worker logs a warning and skips indexing/SQL; explicit user-visible no-text status is absent |
+| Document lifecycle/status API | Not implemented | Persist queued/processing/completed/failed states and implement authorized reads; upload Location currently has no matching GET route |
+| Document ownership and tenant isolation | Not implemented | No per-document access boundaries; authentication alone does not isolate document data |
+
+### Worker, Search, and SQL
+
+| Feature / task | Implementation | Current behavior / remaining work |
+|---|---|---|
+| Service Bus background processing | Implemented | PeekLock, explicit completion/abandon/dead-letter, configurable concurrency and lock renewal |
+| Text chunking with overlap | Implemented | Shared chunker prepares extracted text for embeddings |
+| Azure OpenAI embeddings | Implemented | Batched `text-embedding-3-small` vectors with count/index/dimension validation |
+| Search index provisioning and vector schema | Implemented | Worker ensures index schema; 1536-dimensional vectors |
+| Search chunk upserts | Implemented | Batched uploads with deterministic document/chunk IDs and per-document failure propagation |
+| SQL document metadata | Implemented | Transactional upsert of source, chunk count, and indexed timestamp |
+| Same-document replay idempotency | Implemented | Stable Search keys and SQL upserts; not content deduplication across new uploads |
+| Retry and poison-message handling | Implemented | Invalid messages dead-lettered; processing failures retry up to configured delivery limit |
+| Queue duplicate detection | Implemented | Infrastructure configures a 10-minute window; replay must account for suppression |
+| Cross-service consistency and failure reconciliation | Partial | Search writes precede SQL; no shared transaction, and partial failures require retry/reconciliation |
+| Manual dead-letter diagnosis/replay support | Implemented | Inspection/recovery runbooks and resubmission script exist; not autonomous recovery |
+| Automated recovery orchestration | Not implemented | Diagnosis and recovery remain operator-driven |
+
+### Question answering / RAG
+
+| Feature / task | Implementation | Current behavior / remaining work |
+|---|---|---|
+| Authorized `/ask` route and request validation | Implemented | Rejects empty questions; valid authenticated requests return 503 when chat is disabled |
+| Optional chat-model deployment/configuration | Implemented | Bicep supports chat; disabled in development due to quota |
+| Question embedding result handling | Partial | SDK call exists, but embedding extraction returns null |
+| Vector retrieval of relevant chunks | Not implemented | Placeholder path; ingestion vectors do not provide a working retrieval API |
+| Grounded answer generation and source citations | Not implemented | Interface/response shape and prompt exist; retrieval/context/chat completion are not wired end to end |
+| Prompt-injection protection | Partial | Defensive system prompt and test materials exist; no verified live RAG protection guarantee |
+| Complete and enable live RAG | Not implemented | Finish retrieval/generation, enforce document access, obtain quota, and verify quality, citations, errors, and cost before enabling |
+
+### Azure infrastructure and delivery
+
+| Feature / task | Implementation | Current behavior / remaining work |
+|---|---|---|
+| Parameterized Azure infrastructure | Implemented | Bicep provisions Storage, Event Grid, Service Bus, Document Intelligence, OpenAI, Search, SQL, Key Vault, ACR, Container Apps, Functions, and telemetry resources |
+| API and Worker container images | Implemented | Multi-stage Dockerfiles and ACR deployment; Worker has no HTTP ingress |
+| Worker queue-based autoscaling | Implemented | KEDA scale-to-zero and bounded scale-out; activation observed |
+| Managed identities and service RBAC | Implemented | Runtime service access and telemetry roles; Worker image pull uses a preauthorized user-assigned identity |
+| Flex Consumption Extractor hosting | Implemented | FC1 hosting and compatible isolated-worker telemetry dependencies |
+| Extractor publish/readiness gate | Implemented | Deployment script polls ARM state and indexed `ExtractDocument` before Event Grid activation |
+| Azure DevOps deployment pipeline | Implemented | Build/tests, image publishing, app updates, Function deployment, and optional infrastructure provisioning |
+| Manual deployment and extraction smoke tooling | Implemented | Scripts and commands supplement pipeline deployment |
+| SQL schema and identity grants | Partial | One-time SQL script exists; administrator execution remains manual |
+| Automated SQL schema/grant migrations | Not implemented | Pipeline does not execute database bootstrap/migrations |
+| Existing-server SQL authentication transition | Partial | Entra configuration and manual remediation exist; safe repeatable migration/drift handling remains |
+| Development SQL firewall opt-in | Implemented | Broad Azure-services access enabled in dev; authentication/database permissions still required |
+| Restricted production SQL connectivity | Not implemented | Choose and validate private networking or controlled egress; remove broad Azure-services access |
+| Temporary firewall-rule cleanup | Partial | Stable development access restored; inventory/removal of obsolete test exceptions remains |
+| Populated-environment bootstrap safeguards | Not implemented | Prevent accidental sample-image deployment; normal application releases should not rerun bootstrap |
+
+### Operations, testing, and verification
+
+| Feature / task | Implementation / task status | Evidence / remaining work |
+|---|---|---|
+| Application Insights and Log Analytics | Implemented | Application logs and historical container diagnostics available |
+| Service Bus trace-context propagation | Implemented | Extractor/Worker propagation code exists; verify full API-to-Worker correlation separately |
+| Cost/scale guardrail configuration | Implemented | Delivery/replica limits, capacity settings, and conditional budget notifications; budget is not spending enforcement |
+| Failure alerts and budget delivery validation | Partial | Diagnostics/runbooks and budget definition exist; operational failure alerts and notification delivery need configuration/validation |
+| Automated API, Extractor, Worker, and SQL tests | Implemented | Test suite exists; LocalDB cases skip where unavailable, and mocks do not prove cloud behavior |
+| Infrastructure compilation/configuration checks | Implemented | Historical Bicep/compiled-ARM checks recorded; not live drift verification |
+| Small-document end-to-end verification | Complete | Seven accepted SQL rows each match one Search chunk; latest queue and dead-letter counts are zero |
+| Historical dead-letter disposition | Closed by disposition | Six historical IDs have SQL/Search evidence; two messages intentionally deleted and excluded, not counted as successful ingestion |
+| Full deployed negative-input matrix | Pending | Exercise all validation/authentication cases against the deployed API |
+| Failure/replay/lock-loss testing | Pending | Validate dependency outage, duplicate replay, partial Search-before-SQL failure, and recovery without claiming zero loss from runbooks alone |
+| Load-test tooling | Implemented | Concurrent-upload script and SQL completion query exist |
+| Load, latency, quota, and cost acceptance | Pending | Measure throughput, throttling, queue growth, scaling, and spend; no approved/measured SLA |
+| Live RAG quality and safety tests | Pending | Requires completed RAG; test relevance, citations, no-context, malicious content, access control, and throttling |
+| Retention/deletion and recovery automation | Not implemented | Define originals/derived-data retention, cleanup, sensitive-data handling, and backup/restore procedures |
+| Backup/restore and disaster-recovery exercises | Pending | Define recovery objectives and record successful exercises |
+| Architecture, development, product, and operational documentation | Implemented | Topic docs, runbooks, and deployment evidence exist; historical reviews are not current certification |
+| Production readiness approval | Pending | Requires network/data isolation, alerting, recovery, performance/cost evidence, and agreed operational ownership/SLOs |
+
+The accepted small-document milestone does **not** establish large-payload
+support, working RAG, exhaustive replay safety, or production readiness.
+The supplied Search snapshot contains 18 chunks across nine IDs, but 11 chunks
+belong to the two excluded test messages; only seven matching SQL/Search
+documents are accepted verification samples.
+
+For evidence and remaining-task acceptance criteria, use the latest
+[deployment verification report](docs/development/deployment-verification.md).
+The [feature roadmap](docs/product/feature-roadmap.md) and
+[sprint roadmap](docs/product/sprint-roadmap.md) describe proposed work packages,
+not promises of delivery; their earlier verification proposals must be read
+alongside the latest report.
 
 ## Projects
 
@@ -1221,21 +1337,25 @@ locked (no `MessageLockLost` errors in the logs and `DeliveryCount` stays 1).
 
 ## Sprint 4: RAG /ask endpoint and Worker containerization
 
-Sprint 4 adds a retrieval-augmented generation (RAG) `/ask` endpoint to the API
-and containerizes + deploys the Worker to the managed Container Apps environment
-with KEDA scaling. The Worker processes embedded documents from Sprint 3,
-answering free-form questions over indexed content via Azure OpenAI chat.
+Sprint 4 adds the `/ask` API route and RAG scaffolding, and containerizes +
+deploys the ingestion Worker to the managed Container Apps environment with
+KEDA scaling. The Worker indexes documents; it does not answer questions.
+Retrieval and answer generation in the API remain incomplete.
 
 ### Changes
 
 1. **API RAG service** — Adds `IRagService` (in [Services/RagService.cs](src/DocIntake.Api/Services/RagService.cs)).
    The `/ask` endpoint (`Endpoints/AskEndpoints.cs`) accepts POST with `{ "question": "..." }` and
-  returns `{ "answer": "...", "sources": [...] }` or 404 if no configuration is present.
+   defines the intended `{ "answer": "...", "sources": [...] }` response.
+   Valid authenticated requests return 503 when chat is disabled. If enabled,
+   the current placeholder service returns null and the route returns 404,
+   rather than a grounded answer.
 
    **Note:** Full vector search integration is pending Azure.Search.Documents SDK API stabilization.
    Current implementation returns 404; once the SDK is updated, implement embedding generation,
    vector search configuration via `VectorSearchOptions`, and chat completion with retrieved context.
-   The endpoint and interface are complete; only the internal embeddings/search calls remain.
+   The route and interface exist; embedding result handling, retrieval, context
+   assembly, and chat completion still need implementation and verification.
 
 2. **Key Vault secret for AI Search query key** — `main.bicep` stores the search service's
    query key in Key Vault, and the API managed identity receives the "Key Vault Secrets User"
@@ -1451,8 +1571,9 @@ vector search API is pending finalization. Once the SDK is updated, regenerate t
 
 ## Sprint 5: Hardening, Resilience, and Observability
 
-Sprint 5 closes gaps before production use: prompt injection resistance, cost guardrails,
-dead-letter recovery, end-to-end tracing, load testing, and a security audit.
+Sprint 5 adds hardening foundations, cost guardrails, recovery/trace runbooks,
+load-test tooling, and historical security documentation. These artifacts do
+not close production readiness or prove that every documented test was run.
 
 ### Key Changes
 
@@ -1460,7 +1581,7 @@ dead-letter recovery, end-to-end tracing, load testing, and a security audit.
    - System prompt in [RagService.cs](src/DocIntake.Api/Services/RagService.cs) explicitly instructs the model
      that retrieved document text is untrusted data, not instructions
    - Model is forbidden from following embedded directives, revealing the system prompt, or acknowledging fake overrides
-   - Tested against a payload within a document; hardening confirmed
+   - Test payload materials exist; protection is not established by a live end-to-end RAG test
 
 2. **Access Scoping**
    - Single-tenant deployment: all authenticated users can access all indexed documents
@@ -1484,14 +1605,14 @@ dead-letter recovery, end-to-end tracing, load testing, and a security audit.
 
 5. **Outage Recovery Test** ([docs/runbooks/outage-recovery-test.md](docs/runbooks/outage-recovery-test.md))
    - Procedure to temporarily revoke a dependency (AI Search or OpenAI) and verify recovery
-   - No documents are lost; messages are queued and retried when access is restored
-   - Recovery time: 1-5 minutes after role restoration
+   - Intended check: messages retry after access is restored without document loss
+   - Recovery time and loss guarantees require measured execution evidence
 
 6. **End-to-End Trace Propagation** ([docs/runbooks/trace-propagation.md](docs/runbooks/trace-propagation.md))
    - W3C Trace Context (W3C W3C-Trace-Context) now embedded in Service Bus message ApplicationProperties
    - Extractor [ExtractDocument.cs](src/DocIntake.Extractor/ExtractDocument.cs) extracts Activity.Current.Id and embeds as "traceparent"
    - Worker [IngestionWorker.cs](src/DocIntake.Worker/IngestionWorker.cs) parses traceparent and starts linked Activity
-   - Single operation_Id now links API request → Function execution → Worker processing in Application Insights
+   - Propagation code exists; a shared API-to-Function-to-Worker operation_Id must be verified from deployed traces
    - Kusto query to verify in Monitoring section below
 
 7. **Load Test** ([scripts/load-test-upload.ps1](scripts/load-test-upload.ps1))
@@ -1507,10 +1628,10 @@ dead-letter recovery, end-to-end tracing, load testing, and a security audit.
 
 ### Known Limitations
 
-- **Prompt Injection**: Mitigation tested against one concrete case; other injection techniques may exist. System prompt hardening raises the bar but is not exhaustive.
+- **Prompt Injection**: Defensive prompt exists, but incomplete RAG prevents a live protection claim; further safety testing is required.
 - **Access Scoping**: Single-tenant; all authenticated users query all documents. Multi-tenant variant deferred.
 - **Throttling**: If Worker load exceeds OpenAI or Search capacity, HTTP 429s occur. Increase TPM or reduce `MaxConcurrentCalls` in Worker settings.
-- **Vector Search**: `/ask` endpoint still returns 404 pending Azure.Search.Documents SDK stabilization.
+- **Vector Search**: RAG embedding result handling/retrieval are placeholders. Disabled chat returns 503; enabling chat alone still does not produce answers.
 
 ## Monitoring
 

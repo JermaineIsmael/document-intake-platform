@@ -14,8 +14,9 @@ Topic documentation is organized into [architecture](../architecture/architectur
 
 ## 1. Current outcome
 
-The small-document ingestion path has reached a successful SQL metadata write.
-The supplied SQL screenshot shows:
+**Small-document end-to-end verification is complete, with seven matching
+SQL/Search samples.** The original verified document is shown below.
+The supplied SQL and Search screenshots and queue inspection show:
 
 | Field | Observed value |
 |---|---|
@@ -23,11 +24,57 @@ The supplied SQL screenshot shows:
 | Chunk count | `1` |
 | Indexed at | `2026-10-22 12:58:58.6803004` |
 | Source | Original document Blob Storage URL |
+| Search count / chunk ID | `1` / `6debfb11-d680-48f6-ac64-3973276b8869-0` |
+| Search content | Expected non-sensitive test text confirmed |
+| Queue counts at latest inspection | Portal shows queue `0`, dead-letter `0` |
+| Successful document in dead letters | Absent at earlier eight-message inspection; latest dead-letter count is zero |
 
 The Worker writes metadata after embeddings and successful Search upload.
-Consequently, this row is strong evidence of execution across the ingestion
-pipeline. A direct Search query and confirmation of message completion are
-still required to close out verification for this particular upload.
+The direct Search query confirms matching source, extracted text, and one chunk,
+consistent with SQL. The empty active queue and absence of this document ID
+from all displayed dead letters support successful message settlement.
+These observations close the small-document verification step; they are not a
+separate broker completion audit.
+
+### Follow-up queue and cross-store verification
+
+Evidence supplied at approximately 22:18 UTC+08:00 on 22 October shows the queue
+and dead-letter subqueue both at zero. The historical backlog is therefore
+cleared at this observation; an empty dead-letter queue alone does not prove
+how every original message was settled or recovered.
+
+The SQL screenshot displays seven document rows, each with ChunkCount `1`.
+The supplied Search JSON contains all 18 reported chunks across nine document
+IDs. Comparing the visible SQL IDs against Search gives:
+
+| Document ID | SQL ChunkCount shown | Search chunks returned | Verification |
+|---|---|---|---|
+| `1b19f477-a12e-494d-958d-370a1768381b` | 1 | 1 | Matching persistence shown |
+| `63e00b91-3f24-44ae-a8c3-9cb110820265` | 1 | 1 | Matching persistence shown |
+| `6c817fa3-b223-41bf-a270-c6e73b33b6a7` | 1 | 1 | Matching persistence shown |
+| `6debfb11-d680-48f6-ac64-3973276b8869` | 1 | 1 | Original successful document; matching persistence shown |
+| `c0925172-10b8-4d8c-951d-b305fcfccb37` | 1 | 1 | Matching persistence shown |
+| `f04656f8-349b-4176-9ff9-f0b99ee2ca86` | 1 | 1 | Matching persistence shown |
+| `f9b5ba58-c822-48ae-8a9b-e279646295e8` | 1 | 1 | Matching persistence shown |
+| `1d0e752e-8be0-4ff4-be82-9b3acb6f0a42` | Not visible | 1 | Message intentionally deleted; excluded from accepted samples |
+| `f4c47239-6486-4f8c-a253-933bbbafbb6f` | Not visible | 10 | Message intentionally deleted; excluded from accepted samples |
+
+Six of the eight previously dead-lettered document IDs now have matching
+Search and SQL evidence, alongside the original successful document. Two
+historical IDs have Search results but no SQL row visible in the supplied
+screenshot. At 22:21 UTC+08:00 on 22 October, the user confirmed intentionally
+deleting those two messages from Service Bus and excluding them from the
+verification sample. No further recovery or SQL reconciliation is required
+for those discarded test messages within this verification scope.
+
+The seven matching SQL/Search documents are the accepted verification samples;
+the two discarded messages are not counted as successful ingestion. Their
+11 Search chunks remain part of the supplied 18-chunk snapshot: deleting a
+Service Bus message does not delete existing Search data. This closes the
+historical backlog follow-up by disposition, not by claiming all eight failed
+messages were successfully recovered.
+
+No extracted personal document content is reproduced in this report.
 
 This does **not** establish large-document support, chat functionality, load
 capacity, disaster recovery, or production network isolation.
@@ -253,9 +300,10 @@ Deployment scripts:
 | Worker namespace mismatch | Startup exception; corrected deployment variables supplied | Fix implemented; later SQL attempts prove execution passed startup |
 | SQL networking failure | Dead letters contained SqlException with blocked outbound IPs | Confirmed diagnosis |
 | Successful SQL persistence | Supplied row with one chunk after firewall change | Confirmed for one small document |
-| Embeddings and Search upload | Both precede the successful metadata write in Worker code | Supported indirectly by SQL result; direct Search inspection pending |
-| Final Service Bus completion | No post-success queue settlement evidence supplied | Pending |
-| Earlier dead-letter recovery | Six failures previously observed | Pending; latest backlog size unknown |
+| Embeddings and Search upload | Direct Search result matches source/text and SQL ChunkCount 1; embeddings precede those writes | Confirmed for this small document; vector retrieval quality not tested |
+| Final Service Bus completion | Latest Portal snapshot shows queue 0 and dead-letter 0; successful ID has matching Search/SQL | Small-document verification complete; no backlog at observation |
+| Earlier dead-letter disposition | Six historical IDs now match Search/SQL; user confirmed deleting the other two messages; dead-letter count 0 | Closed for this test scope; two discarded messages excluded, not counted as recovered |
+| Cross-store batch verification | 7 visible SQL rows each match one Search chunk; 11 additional Search chunks belong to the 2 excluded IDs | Complete for 7 accepted samples; excluded Search results do not establish SQL persistence |
 | Extractor regression tests | Prior local targeted run: 9 passed; publish/dependency metadata verified | Historical local validation, not rerun for this document |
 | Infrastructure checks | Prior compilation and ARM assertions for Worker settings/firewall | Historical validation, not a live drift check |
 
@@ -363,9 +411,7 @@ access tokens, keys, connection strings, or sensitive document content.
 
 | Priority | Task / limitation | Completion criteria |
 |---|---|---|
-| High | Finish small-document verification | Direct Search result matches SQL ChunkCount; successful message settlement confirmed |
 | High | Large-text claim-check design | Extracted text stored privately in Blob Storage; queue carries a validated reference; Worker retrieves it; identities, contracts, retries, cleanup, and tests updated |
-| High | Recover earlier dead letters | Fix confirmed per error; replay one at a time; verify Search/SQL before removing originals; account for duplicate detection |
 | High before production | Restricted SQL connectivity | Choose private networking/DNS or supported controlled-egress architecture, review cost/migration, remove broad Azure-services rule |
 | High | Existing SQL authentication drift/migration | Verify group admin and Entra-only state; support repeat deployments without weakening authentication or losing admin access |
 | Medium | Remove temporary firewall exceptions | Inventory/remove only obsolete named test rules after stable access is verified |
