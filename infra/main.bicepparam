@@ -15,6 +15,7 @@ param sqlAdminGroupObjectId = 'bfb28293-869e-4c78-85be-b85138312aa9'
 // Candidate region/name for validation; subscription availability is not yet confirmed.
 param sqlLocation = 'westus3'
 param sqlServerNameOverride = 'di-docintake-dev-sql-wus3-20261021'
+param allowAzureServicesToSql = true
 // Sprint 3 local development only: your own Entra user object ID, which runs the worker locally.
 // az ad signed-in-user show --query id -o tsv
 // Sprint 4 replaces this with the worker Container App's managed identity.

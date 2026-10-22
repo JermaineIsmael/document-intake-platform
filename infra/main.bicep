@@ -59,6 +59,9 @@ param sqlLocation string = location
 @description('Optional globally unique SQL server name. Empty preserves the generated name.')
 param sqlServerNameOverride string = ''
 
+@description('Allow connections to SQL from Azure services, including resources outside this subscription. Development opt-in only; authentication and database permissions are still required.')
+param allowAzureServicesToSql bool = false
+
 @description('Grant development identities Worker roles. Not required for the deployed Worker managed identity.')
 param enableLocalWorkerAccess bool = true
 
@@ -245,6 +248,15 @@ resource sqlServer 'Microsoft.Sql/servers@2025-01-01' = {
       principalType: 'Group'
       tenantId: tenant().tenantId
     }
+  }
+}
+
+resource sqlAzureServicesFirewallRule 'Microsoft.Sql/servers/firewallRules@2025-01-01' = if (allowAzureServicesToSql) {
+  parent: sqlServer
+  name: 'AllowAzureServices'
+  properties: {
+    startIpAddress: '0.0.0.0'
+    endIpAddress: '0.0.0.0'
   }
 }
 
