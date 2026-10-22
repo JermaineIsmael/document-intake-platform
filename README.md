@@ -456,6 +456,11 @@ needs permission to create and assign user-assigned managed identities (included
 in Contributor at the resource-group scope). New RBAC assignments can take time
 to propagate; if image pulls still fail, inspect Worker system logs and verify
 the pull identity's registry role before retrying.
+The Worker receives a fully qualified `ServiceBus__Namespace`
+(`<namespace>.servicebus.windows.net`), plus `Sql__Server` and `Sql__Database`.
+It builds its SQL connection string at startup and authenticates using its
+managed identity; `Sql__ConnectionString` is not consumed. The Service Bus
+scaler's `metadata.namespace` remains the bare namespace name.
 If either infrastructure deployment fails, the pipeline prints failed ARM
 operations (including the nested API and Worker deployments), API/Worker revision provisioning
 details, and up to 100 system log entries. System log collection is limited to

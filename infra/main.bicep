@@ -770,7 +770,7 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
     envVars: [
       {
         name: 'ServiceBus__Namespace'
-        value: serviceBusNamespaceName
+        value: '${serviceBus.name}.servicebus.windows.net'
       }
       {
         name: 'ServiceBus__QueueName'
@@ -789,8 +789,12 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
         value: 'https://${search.name}.search.windows.net'
       }
       {
-        name: 'Sql__ConnectionString'
-        value: 'Server=tcp:${sqlServer.properties.fullyQualifiedDomainName},1433;Initial Catalog=${sqlDatabase.name};Authentication=Active Directory Default;'
+        name: 'Sql__Server'
+        value: sqlServer.properties.fullyQualifiedDomainName
+      }
+      {
+        name: 'Sql__Database'
+        value: sqlDatabase.name
       }
       {
         name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
