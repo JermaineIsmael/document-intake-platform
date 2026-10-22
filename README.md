@@ -456,6 +456,11 @@ needs permission to create and assign user-assigned managed identities (included
 in Contributor at the resource-group scope). New RBAC assignments can take time
 to propagate; if image pulls still fail, inspect Worker system logs and verify
 the pull identity's registry role before retrying.
+The Worker receives a fully qualified `ServiceBus__Namespace`
+(`<namespace>.servicebus.windows.net`), plus `Sql__Server` and `Sql__Database`.
+It builds its SQL connection string at startup and authenticates using its
+managed identity; `Sql__ConnectionString` is not consumed. The Service Bus
+scaler's `metadata.namespace` remains the bare namespace name.
 If either infrastructure deployment fails, the pipeline prints failed ARM
 operations (including the nested API and Worker deployments), API/Worker revision provisioning
 details, and up to 100 system log entries. System log collection is limited to
@@ -472,6 +477,19 @@ it does not migrate databases or delete the old server. Worker SQL connection
 settings and the SQL server FQDN output follow the selected name. Local Worker
 role assignments and chat remain disabled through `enableLocalWorkerAccess`
 and `deployChat`.
+
+For development, this environment sets `allowAzureServicesToSql = true`.
+The template defaults it to `false`. Opting in creates the SQL firewall rule
+`AllowAzureServices` with start/end IP `0.0.0.0`, Azure SQL's special rule for
+Azure-origin connections. This avoids maintaining the Worker's changing outbound
+IPs, but permits network connection attempts from Azure resources outside this
+subscription too. Entra-only authentication and database permissions remain
+required. Allow up to five minutes for firewall changes to take effect.
+Use private connectivity or controlled egress for production instead.
+Existing individual-IP rules are not removed automatically. With incremental
+deployments, setting the parameter back to `false` also does not delete an
+already-created rule; explicitly delete `AllowAzureServices` from the SQL server
+to revoke this network access.
 
 For the **first run only**, queue the pipeline with
 `provisionInfrastructure=true`. This creates the base resources and ACR, then
