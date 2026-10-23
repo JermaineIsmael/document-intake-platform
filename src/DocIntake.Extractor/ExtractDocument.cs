@@ -16,6 +16,7 @@ public sealed class ExtractDocument(
     BlobServiceClient blobServiceClient,
     DocumentIntelligenceClient documentIntelligenceClient,
     ServiceBusSender sender,
+    IDocumentStatusPublisher statusPublisher,
     IConfiguration configuration,
     ILogger<ExtractDocument> logger)
 {
@@ -71,22 +72,44 @@ public sealed class ExtractDocument(
             var fileName = pathSegments[^1];
             var blob = blobServiceClient.GetBlobContainerClient(containerName)
                 .GetBlobClient($"{documentIdSegment}/{fileName}");
-            var downloaded = await blob.DownloadContentAsync(cancellationToken);
-            var operation = await documentIntelligenceClient.AnalyzeDocumentAsync(
-                WaitUntil.Completed,
-                "prebuilt-read",
-                downloaded.Value.Content,
-                cancellationToken: cancellationToken);
 
-            var sourceBlob = blobServiceClient.GetBlobContainerClient(containerName)
-                .GetBlobClient($"{documentIdSegment}/{pathSegments[^1]}");
-            var properties = await sourceBlob.GetPropertiesAsync(cancellationToken: cancellationToken);
+            // Ownership is validated before any status is reported, so events always carry a trusted owner.
+            var properties = await blob.GetPropertiesAsync(cancellationToken: cancellationToken);
             if (!properties.Value.Metadata.TryGetValue("ownerId", out var ownerId)
                 || !Guid.TryParse(ownerId, out _)
                 || !properties.Value.Metadata.TryGetValue("createdAt", out var createdAtValue)
                 || !DateTimeOffset.TryParse(createdAtValue, out var createdAt))
             {
                 throw new InvalidOperationException("Uploaded document is missing valid ownership or creation metadata.");
+            }
+
+            await statusPublisher.PublishAsync(
+                new DocumentStatusEvent(documentId, ownerId, DocumentStatus.Extracting, null, DateTimeOffset.UtcNow),
+                cancellationToken);
+
+            var downloaded = await blob.DownloadContentAsync(cancellationToken);
+            Operation<AnalyzeResult> operation;
+            try
+            {
+                operation = await documentIntelligenceClient.AnalyzeDocumentAsync(
+                    WaitUntil.Completed,
+                    "prebuilt-read",
+                    downloaded.Value.Content,
+                    cancellationToken: cancellationToken);
+            }
+            catch (RequestFailedException exception) when (exception.Status is 400 or 415)
+            {
+                // Corrupt, encrypted, or unsupported content fails identically on every retry, so record a
+                // terminal status instead of rethrowing into Event Grid retries.
+                logger.LogWarning(
+                    "Document Intelligence rejected document {DocumentId} as unreadable ({ErrorCode})",
+                    documentId,
+                    exception.ErrorCode);
+                await statusPublisher.PublishAsync(
+                    new DocumentStatusEvent(documentId, ownerId, DocumentStatus.Failed,
+                        DocumentFailureCodes.UnsupportedContent, DateTimeOffset.UtcNow),
+                    cancellationToken);
+                return;
             }
 
             var extractedText = operation.Value.Content ?? string.Empty;

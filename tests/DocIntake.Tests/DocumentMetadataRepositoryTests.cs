@@ -28,22 +28,11 @@ public sealed class DocumentMetadataRepositoryTests : IAsyncLifetime
         }
 
         await ExecuteAsync("master", $"CREATE DATABASE [{_database}];");
-        // Same table definition as sql/schema.sql.
-        await ExecuteAsync(_database, """
-            CREATE TABLE dbo.Documents
-            (
-                Id         nvarchar(64)   NOT NULL CONSTRAINT PK_Documents PRIMARY KEY,
-                SourceUrl  nvarchar(2048) NOT NULL,
-                BlobName   nvarchar(2048) NOT NULL,
-                OwnerId    nvarchar(128)  NOT NULL,
-                ChunkCount int            NOT NULL,
-                CreatedAt  datetime2      NOT NULL,
-                IndexedAt  datetime2      NULL,
-                DeletedAt datetime2 NULL,
-                RecoverableUntil datetime2 NULL,
-                DeletionProcessedAt datetime2 NULL
-            );
-            """);
+        // The real, versioned migrations build the schema, so these tests also exercise every script.
+        foreach (var batch in DocIntake.Migrations.MigrationScripts.LoadEmbedded().SelectMany(script => script.Batches))
+        {
+            await ExecuteAsync(_database, batch);
+        }
     }
 
     public async Task DisposeAsync()
@@ -107,6 +96,95 @@ public sealed class DocumentMetadataRepositoryTests : IAsyncLifetime
         await longId.Should().ThrowAsync<ArgumentException>();
         await longUrl.Should().ThrowAsync<ArgumentException>();
         (await ReadRowsAsync()).Should().BeEmpty();
+    }
+
+    [LocalDbFact]
+    public async Task Status_updates_only_move_forward_and_success_supersedes_failure()
+    {
+        var time = new ManualTimeProvider(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        var repository = new DocumentMetadataRepository(ConnectionString(_database), credential: null, time);
+        var id = Guid.NewGuid().ToString("D");
+        const string owner = "00000000-0000-0000-0000-000000000001";
+        await InsertQueuedAsync(id, owner, time.Now.UtcDateTime);
+
+        (await repository.TryUpdateStatusAsync(id, owner, DocIntake.Shared.DocumentStatus.Processing, null, default))
+            .Should().BeTrue();
+        (await repository.TryUpdateStatusAsync(id, owner, DocIntake.Shared.DocumentStatus.Extracting, null, default))
+            .Should().BeFalse("a late Extracting event must not move the document backwards");
+        (await repository.TryUpdateStatusAsync(id, Guid.NewGuid().ToString("D"),
+            DocIntake.Shared.DocumentStatus.Failed, "IndexingFailed", default)).Should().BeFalse("wrong owner");
+        (await repository.TryUpdateStatusAsync(id, owner, DocIntake.Shared.DocumentStatus.Failed, "IndexingFailed", default))
+            .Should().BeTrue();
+        (await ReadStatusAsync(id)).Should().Be(("Failed", "IndexingFailed"));
+
+        await repository.SaveAsync(id, "https://st/documents/a.pdf", $"{id}/a.pdf", owner,
+            DateTimeOffset.UnixEpoch, 0, default);
+
+        (await ReadStatusAsync(id)).Should().Be(("NoText", (string?)null));
+        (await repository.TryUpdateStatusAsync(id, owner, DocIntake.Shared.DocumentStatus.Failed, "IndexingFailed", default))
+            .Should().BeFalse("terminal results are not replaced by later failures");
+    }
+
+    [LocalDbFact]
+    public async Task Stale_in_flight_documents_time_out_but_recent_and_terminal_ones_do_not()
+    {
+        var now = new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero);
+        var repository = new DocumentMetadataRepository(ConnectionString(_database), credential: null);
+        const string owner = "00000000-0000-0000-0000-000000000001";
+        var stale = Guid.NewGuid().ToString("D");
+        var recent = Guid.NewGuid().ToString("D");
+        var indexed = Guid.NewGuid().ToString("D");
+        await InsertQueuedAsync(stale, owner, now.AddHours(-27).UtcDateTime);
+        await InsertQueuedAsync(recent, owner, now.AddHours(-1).UtcDateTime);
+        await InsertQueuedAsync(indexed, owner, now.AddHours(-30).UtcDateTime, status: "Indexed");
+
+        var count = await repository.FailStaleAsync(now, TimeSpan.FromHours(26), 100, default);
+
+        count.Should().Be(1);
+        (await ReadStatusAsync(stale)).Should().Be(("Failed", "ProcessingTimedOut"));
+        (await ReadStatusAsync(recent)).Should().Be(("Queued", (string?)null));
+        (await ReadStatusAsync(indexed)).Should().Be(("Indexed", (string?)null));
+    }
+
+    [LocalDbFact]
+    public async Task Schema_rejects_unknown_statuses_and_inconsistent_failure_codes()
+    {
+        var id = Guid.NewGuid().ToString("D");
+        await InsertQueuedAsync(id, "owner", DateTime.UtcNow);
+
+        var unknown = () => ExecuteAsync(_database, $"UPDATE dbo.Documents SET Status = N'Done' WHERE Id = N'{id}'");
+        var failedWithoutCode = () => ExecuteAsync(_database,
+            $"UPDATE dbo.Documents SET Status = N'Failed' WHERE Id = N'{id}'");
+
+        await unknown.Should().ThrowAsync<SqlException>();
+        await failedWithoutCode.Should().ThrowAsync<SqlException>();
+    }
+
+    private async Task InsertQueuedAsync(string id, string ownerId, DateTime at, string status = "Queued")
+    {
+        await using var connection = new SqlConnection(ConnectionString(_database));
+        await connection.OpenAsync();
+        await using var command = new SqlCommand("""
+            INSERT dbo.Documents (Id, SourceUrl, BlobName, OwnerId, ChunkCount, CreatedAt, Status, StatusUpdatedAt)
+            VALUES (@Id, N'https://st/documents/a.pdf', @Id + N'/a.pdf', @OwnerId, 0, @At, @Status, @At);
+            """, connection);
+        command.Parameters.AddWithValue("@Id", id);
+        command.Parameters.AddWithValue("@OwnerId", ownerId);
+        command.Parameters.Add("@At", System.Data.SqlDbType.DateTime2).Value = at;
+        command.Parameters.AddWithValue("@Status", status);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private async Task<(string Status, string? FailureCode)> ReadStatusAsync(string id)
+    {
+        await using var connection = new SqlConnection(ConnectionString(_database));
+        await connection.OpenAsync();
+        await using var command = new SqlCommand(
+            "SELECT Status, FailureCode FROM dbo.Documents WHERE Id = @Id", connection);
+        command.Parameters.AddWithValue("@Id", id);
+        await using var reader = await command.ExecuteReaderAsync();
+        (await reader.ReadAsync()).Should().BeTrue();
+        return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1));
     }
 
     private async Task<List<(string Id, string SourceUrl, string BlobName, string OwnerId, int ChunkCount,

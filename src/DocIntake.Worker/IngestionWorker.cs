@@ -37,6 +37,7 @@ public sealed class IngestionWorker(
     ServiceBusClient serviceBusClient,
     SearchIndexClient searchIndexClient,
     IChunkIndexer indexer,
+    IDocumentMetadataRepository metadata,
     IOptions<IngestionWorkerOptions> options,
     ILogger<IngestionWorker> logger) : BackgroundService
 {
@@ -122,7 +123,7 @@ public sealed class IngestionWorker(
 
         try
         {
-            if (!TryParse(message, out var document, out var parseError))
+            if (!TryParse(message, out var document, out var candidate, out var parseError))
             {
                 // A malformed message fails identically on every delivery, so retrying only delays it.
                 logger.LogError(
@@ -130,6 +131,12 @@ public sealed class IngestionWorker(
                     message.MessageId,
                     message.DeliveryCount,
                     parseError);
+                if (candidate is not null && candidate.DocumentId != Guid.Empty && Guid.TryParse(candidate.OwnerId, out _))
+                {
+                    await MarkFailedAsync(candidate.DocumentId.ToString("D"), candidate.OwnerId,
+                        DocumentFailureCodes.InvalidMessage).ConfigureAwait(false);
+                }
+
                 await SettleAsync(() => args.DeadLetterMessageAsync(
                     message, "InvalidDocumentMessage", Truncate(parseError), ct), message, "dead-letter").ConfigureAwait(false);
                 return;
@@ -159,6 +166,8 @@ public sealed class IngestionWorker(
                         documentId,
                         message.DeliveryCount,
                         _options.MaxDeliveryCount);
+                    await MarkFailedAsync(documentId, document.OwnerId, DocumentFailureCodes.IndexingFailed)
+                        .ConfigureAwait(false);
                     await SettleAsync(() => args.DeadLetterMessageAsync(
                         message,
                         "IndexingFailed",
@@ -223,13 +232,31 @@ public sealed class IngestionWorker(
         }
     }
 
-    private static bool TryParse(ServiceBusReceivedMessage message, out DocumentMessage document, out string error)
+    // Status is best-effort: the dead-lettered message remains the durable record, and the stale-status
+    // sweep eventually marks the document Failed if this write is lost.
+    private async Task MarkFailedAsync(string documentId, string ownerId, string failureCode)
+    {
+        try
+        {
+            await metadata.TryUpdateStatusAsync(documentId, ownerId, DocumentStatus.Failed, failureCode,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not mark {DocumentId} as Failed ({FailureCode})", documentId, failureCode);
+        }
+    }
+
+    private static bool TryParse(
+        ServiceBusReceivedMessage message, out DocumentMessage document, out DocumentMessage? candidate, out string error)
     {
         document = null!;
+        candidate = null;
         DocumentMessage? parsed;
         try
         {
             parsed = message.Body.ToObjectFromJson<DocumentMessage>(MessageJsonOptions);
+            candidate = parsed;
         }
         catch (JsonException ex)
         {

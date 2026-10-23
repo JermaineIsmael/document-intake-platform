@@ -1,5 +1,6 @@
 using System.Data;
 using Azure.Core;
+using DocIntake.Shared;
 using Microsoft.Data.SqlClient;
 
 namespace DocIntake.Worker;
@@ -16,6 +17,9 @@ public interface IDocumentMetadataRepository
     Task SaveAsync(
         string documentId, string sourceUrl, string sourceBlobName, string ownerId,
         DateTimeOffset createdAt, int chunkCount, CancellationToken ct);
+    Task<bool> TryUpdateStatusAsync(
+        string documentId, string ownerId, DocumentStatus status, string? failureCode, CancellationToken ct);
+    Task<int> FailStaleAsync(DateTimeOffset now, TimeSpan timeout, int batchSize, CancellationToken ct);
     Task MarkExpiredAsync(DateTimeOffset now, int retentionDays, int batchSize, CancellationToken ct);
     Task<IReadOnlyList<RetentionDocument>> GetPendingCleanupAsync(int batchSize, CancellationToken ct);
     Task MarkDeletionProcessedAsync(string documentId, DateTimeOffset processedAt, CancellationToken ct);
@@ -31,6 +35,8 @@ public sealed class DocumentMetadataRepository : IDocumentMetadataRepository
 
     private static readonly string[] SqlScopes = ["https://database.windows.net/.default"];
 
+    // A terminal result is persisted with the chunk count: Indexed when chunks exist, NoText when the
+    // extracted text produced none. Success also supersedes an earlier Failed (for example a timeout).
     internal const string UpsertSql = """
         SET XACT_ABORT ON;
         BEGIN TRANSACTION;
@@ -39,7 +45,10 @@ public sealed class DocumentMetadataRepository : IDocumentMetadataRepository
            SET SourceUrl = @SourceUrl,
                BlobName = @BlobName,
                ChunkCount = @ChunkCount,
-               IndexedAt = @IndexedAt
+               IndexedAt = @IndexedAt,
+               Status = @Status,
+               StatusUpdatedAt = @IndexedAt,
+               FailureCode = NULL
          WHERE Id = @Id AND OwnerId = @OwnerId AND DeletedAt IS NULL;
 
         IF @@ROWCOUNT = 0
@@ -47,11 +56,42 @@ public sealed class DocumentMetadataRepository : IDocumentMetadataRepository
             IF EXISTS (SELECT 1 FROM dbo.Documents WHERE Id = @Id)
                 THROW 51000, 'Document is deleted or belongs to a different owner.', 1;
 
-            INSERT dbo.Documents (Id, SourceUrl, BlobName, OwnerId, ChunkCount, CreatedAt, IndexedAt)
-            VALUES (@Id, @SourceUrl, @BlobName, @OwnerId, @ChunkCount, @CreatedAt, @IndexedAt);
+            INSERT dbo.Documents (Id, SourceUrl, BlobName, OwnerId, ChunkCount, CreatedAt, IndexedAt,
+                                  Status, StatusUpdatedAt, FailureCode)
+            VALUES (@Id, @SourceUrl, @BlobName, @OwnerId, @ChunkCount, @CreatedAt, @IndexedAt,
+                    @Status, @IndexedAt, NULL);
         END;
 
         COMMIT TRANSACTION;
+        """;
+
+    private const string StatusRank =
+        "CASE {0} WHEN N'Queued' THEN 0 WHEN N'Extracting' THEN 1 WHEN N'Processing' THEN 2 ELSE 3 END";
+
+    // Mirrors DocumentStatusTransitions.CanTransition so concurrent or out-of-order events only move forward.
+    internal static readonly string UpdateStatusSql = $"""
+        UPDATE dbo.Documents
+           SET Status = @Status, StatusUpdatedAt = @Now, FailureCode = @FailureCode
+         WHERE Id = @Id AND OwnerId = @OwnerId AND DeletedAt IS NULL
+           AND (
+                (Status = N'Failed' AND @Status IN (N'Indexed', N'NoText'))
+             OR (Status <> N'Failed' AND {string.Format(System.Globalization.CultureInfo.InvariantCulture, StatusRank, "@Status")}
+                                      > {string.Format(System.Globalization.CultureInfo.InvariantCulture, StatusRank, "Status")})
+           );
+        """;
+
+    internal const string FailStaleSql = """
+        ;WITH stale AS
+        (
+            SELECT TOP (@BatchSize) *
+            FROM dbo.Documents WITH (READPAST, UPDLOCK, ROWLOCK)
+            WHERE DeletedAt IS NULL
+              AND Status IN (N'Queued', N'Extracting', N'Processing')
+              AND StatusUpdatedAt <= @Cutoff
+            ORDER BY StatusUpdatedAt
+        )
+        UPDATE stale
+        SET Status = N'Failed', FailureCode = @FailureCode, StatusUpdatedAt = @Now;
         """;
 
     private readonly string _connectionString;
@@ -99,7 +139,47 @@ public sealed class DocumentMetadataRepository : IDocumentMetadataRepository
         command.Parameters.Add("@ChunkCount", SqlDbType.Int).Value = chunkCount;
         command.Parameters.Add("@CreatedAt", SqlDbType.DateTime2).Value = createdAt.UtcDateTime;
         command.Parameters.Add("@IndexedAt", SqlDbType.DateTime2).Value = _timeProvider.GetUtcNow().UtcDateTime;
+        command.Parameters.Add("@Status", SqlDbType.NVarChar, 32).Value =
+            (chunkCount > 0 ? DocumentStatus.Indexed : DocumentStatus.NoText).ToString();
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    public async Task<bool> TryUpdateStatusAsync(
+        string documentId, string ownerId, DocumentStatus status, string? failureCode, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(documentId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        if (status == DocumentStatus.Queued || !Enum.IsDefined(status))
+        {
+            throw new ArgumentOutOfRangeException(nameof(status), status, "Queued is set only at registration.");
+        }
+
+        if (status == DocumentStatus.Failed ? !DocumentFailureCodes.IsKnown(failureCode) : failureCode is not null)
+        {
+            throw new ArgumentException("Failed requires a known failure code; other statuses must not have one.",
+                nameof(failureCode));
+        }
+
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = new SqlCommand(UpdateStatusSql, connection);
+        AddIdentity(command, documentId, ownerId);
+        command.Parameters.Add("@Status", SqlDbType.NVarChar, 32).Value = status.ToString();
+        command.Parameters.Add("@FailureCode", SqlDbType.NVarChar, 64).Value = (object?)failureCode ?? DBNull.Value;
+        command.Parameters.Add("@Now", SqlDbType.DateTime2).Value = _timeProvider.GetUtcNow().UtcDateTime;
+        return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1;
+    }
+
+    public async Task<int> FailStaleAsync(DateTimeOffset now, TimeSpan timeout, int batchSize, CancellationToken ct)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(batchSize);
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = new SqlCommand(FailStaleSql, connection);
+        command.Parameters.Add("@BatchSize", SqlDbType.Int).Value = batchSize;
+        command.Parameters.Add("@Cutoff", SqlDbType.DateTime2).Value = (now - timeout).UtcDateTime;
+        command.Parameters.Add("@Now", SqlDbType.DateTime2).Value = now.UtcDateTime;
+        command.Parameters.Add("@FailureCode", SqlDbType.NVarChar, 64).Value = DocumentFailureCodes.ProcessingTimedOut;
+        return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     public async Task MarkExpiredAsync(DateTimeOffset now, int retentionDays, int batchSize, CancellationToken ct)

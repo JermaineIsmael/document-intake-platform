@@ -25,7 +25,7 @@ administrators and developers support configuration and delivery.
 | FR-05 | Deliver extracted text for chunking and embedding | Claim-check implemented in code; live large-document verification pending |
 | FR-06 | Index text/vectors and upsert metadata keyed by document ID | Implemented; small-document SQL evidence |
 | FR-07 | Retry/reconcile failures without silently dropping work | Retry/dead-letter mechanisms implemented; recovery verification pending |
-| FR-08 | Expose document lifecycle and actionable failure status to authorized callers | Owner-scoped queued/indexed/deleted API implemented; processing/failed states remain |
+| FR-08 | Expose document lifecycle and actionable failure status to authorized callers | Owner-scoped status API with queued/extracting/processing/indexed/noText/failed/deleted and caller-safe failure details implemented; live verification pending |
 | FR-09 | Answer questions using authorized document context with sources | Planned/partial route; RAG placeholders, chat disabled |
 | FR-10 | Support larger extracted text without truncation | Private Blob claim-check implemented; live service-limit verification pending |
 
@@ -59,7 +59,7 @@ design.
 
 1. Which document sizes, formats, languages, and sensitivity levels are supported?
 2. Who can access each document and its derived chunks?
-3. What lifecycle/status and empty-text behavior should users see?
+3. Are the implemented lifecycle states, failure messages, `noText` result, and 26-hour stale timeout acceptable to users?
 4. Are the implemented 90-day retention and 30-day restore defaults acceptable?
 5. What latency, volume, budget, and production network constraints apply?
 6. Is complete RAG required for the next release, or a separate milestone?

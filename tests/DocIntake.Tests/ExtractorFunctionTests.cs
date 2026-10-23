@@ -119,7 +119,9 @@ public sealed class ExtractorFunctionTests
     private static ExtractDocument CreateFunction(
         TokenCredential credential,
         ServiceBusSender sender,
-        ILogger<ExtractDocument>? logger = null)
+        ILogger<ExtractDocument>? logger = null,
+        IDocumentStatusPublisher? publisher = null,
+        Azure.Core.Pipeline.HttpPipelineTransport? transport = null)
     {
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
@@ -127,11 +129,22 @@ public sealed class ExtractorFunctionTests
             ["Storage:ContainerName"] = "documents"
         }).Build();
 
+        var blobOptions = new BlobClientOptions();
+        var intelligenceOptions = new DocumentIntelligenceClientOptions();
+        if (transport is not null)
+        {
+            blobOptions.Transport = transport;
+            blobOptions.Retry.MaxRetries = 0;
+            intelligenceOptions.Transport = transport;
+            intelligenceOptions.Retry.MaxRetries = 0;
+        }
+
         return new ExtractDocument(
-            new BlobServiceClient(new Uri("https://test.blob.core.windows.net"), credential),
+            new BlobServiceClient(new Uri("https://test.blob.core.windows.net"), credential, blobOptions),
             new DocumentIntelligenceClient(
-                new Uri("https://test.cognitiveservices.azure.com/"), credential),
+                new Uri("https://test.cognitiveservices.azure.com/"), credential, intelligenceOptions),
             sender,
+            publisher ?? new RecordingStatusPublisher(),
             configuration,
             logger ?? NullLogger<ExtractDocument>.Instance);
     }
@@ -168,5 +181,131 @@ public sealed class ExtractorFunctionTests
     }
 
     private sealed record LogEntry(LogLevel Level, string Message, Exception? Exception);
+
+    [Fact]
+    public async Task Unreadable_document_reports_extracting_then_failed_unsupported_content_without_retry()
+    {
+        var documentId = Guid.NewGuid();
+        var ownerId = Guid.NewGuid().ToString("D");
+        using var handler = new FakeExtractorServices(ownerId, analyzeStatus: System.Net.HttpStatusCode.BadRequest);
+        await using var serviceBus = new ServiceBusClient("docintake-test.servicebus.windows.net", new FakeTokenCredential());
+        await using var sender = serviceBus.CreateSender("extracted-documents");
+        var publisher = new RecordingStatusPublisher();
+        var function = CreateFunction(new FakeTokenCredential(), sender, publisher: publisher,
+            transport: new Azure.Core.Pipeline.HttpClientTransport(handler.HttpClient));
+
+        var act = () => function.Run(BlobCreated(documentId), CancellationToken.None);
+
+        await act.Should().NotThrowAsync("content rejected by Document Intelligence fails the same way on every retry");
+        publisher.Events.Select(e => (e.DocumentId, e.OwnerId, e.Status, e.FailureCode)).Should().Equal(
+            (documentId, ownerId, DocIntake.Shared.DocumentStatus.Extracting, (string?)null),
+            (documentId, ownerId, DocIntake.Shared.DocumentStatus.Failed,
+                DocIntake.Shared.DocumentFailureCodes.UnsupportedContent));
+        publisher.Events.Select(e => e.MessageId).Should().OnlyHaveUniqueItems();
+    }
+
+    [Fact]
+    public async Task Transient_document_intelligence_failure_is_rethrown_after_reporting_extracting()
+    {
+        var documentId = Guid.NewGuid();
+        using var handler = new FakeExtractorServices(Guid.NewGuid().ToString("D"),
+            analyzeStatus: System.Net.HttpStatusCode.ServiceUnavailable);
+        await using var serviceBus = new ServiceBusClient("docintake-test.servicebus.windows.net", new FakeTokenCredential());
+        await using var sender = serviceBus.CreateSender("extracted-documents");
+        var publisher = new RecordingStatusPublisher();
+        var function = CreateFunction(new FakeTokenCredential(), sender, publisher: publisher,
+            transport: new Azure.Core.Pipeline.HttpClientTransport(handler.HttpClient));
+
+        var act = () => function.Run(BlobCreated(documentId), CancellationToken.None);
+
+        await act.Should().ThrowAsync<Azure.RequestFailedException>();
+        publisher.Events.Should().ContainSingle()
+            .Which.Status.Should().Be(DocIntake.Shared.DocumentStatus.Extracting);
+    }
+
+    [Fact]
+    public async Task Missing_owner_metadata_reports_no_status()
+    {
+        using var handler = new FakeExtractorServices(ownerId: null, analyzeStatus: System.Net.HttpStatusCode.BadRequest);
+        await using var serviceBus = new ServiceBusClient("docintake-test.servicebus.windows.net", new FakeTokenCredential());
+        await using var sender = serviceBus.CreateSender("extracted-documents");
+        var publisher = new RecordingStatusPublisher();
+        var function = CreateFunction(new FakeTokenCredential(), sender, publisher: publisher,
+            transport: new Azure.Core.Pipeline.HttpClientTransport(handler.HttpClient));
+
+        var act = () => function.Run(BlobCreated(Guid.NewGuid()), CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*ownership*");
+        publisher.Events.Should().BeEmpty();
+    }
+
+    private static EventGridEvent BlobCreated(Guid documentId) => new(
+        "test-id",
+        "Microsoft.Storage.BlobCreated",
+        "1.0",
+        BinaryData.FromObjectAsJson(new
+        {
+            url = $"https://test.blob.core.windows.net/documents/{documentId:D}/invoice.pdf"
+        }));
+
+    private sealed class RecordingStatusPublisher : IDocumentStatusPublisher
+    {
+        public List<DocIntake.Shared.DocumentStatusEvent> Events { get; } = [];
+
+        public Task PublishAsync(DocIntake.Shared.DocumentStatusEvent statusEvent, CancellationToken ct)
+        {
+            Events.Add(statusEvent);
+            return Task.CompletedTask;
+        }
+    }
+
+    // Blob HEAD/GET and the Document Intelligence analyze call over a fake HTTP transport.
+    private sealed class FakeExtractorServices(string? ownerId, System.Net.HttpStatusCode analyzeStatus)
+        : HttpMessageHandler
+    {
+        private HttpClient? _client;
+
+        public HttpClient HttpClient => _client ??= new HttpClient(this, disposeHandler: false);
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            HttpResponseMessage response;
+            if (request.RequestUri!.Host.StartsWith("test.blob", StringComparison.Ordinal))
+            {
+                response = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent([0x25, 0x50, 0x44, 0x46])
+                };
+                response.Headers.Add("x-ms-blob-type", "BlockBlob");
+                if (ownerId is not null)
+                {
+                    response.Headers.Add("x-ms-meta-ownerId", ownerId);
+                    response.Headers.Add("x-ms-meta-createdAt", DateTimeOffset.UtcNow.ToString("O"));
+                }
+            }
+            else
+            {
+                response = new HttpResponseMessage(analyzeStatus)
+                {
+                    Content = new StringContent(
+                        """{"error":{"code":"InvalidRequest","message":"The file is corrupted or format is unsupported."}}""",
+                        System.Text.Encoding.UTF8,
+                        "application/json")
+                };
+            }
+
+            return Task.FromResult(response);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _client?.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+    }
 
 }

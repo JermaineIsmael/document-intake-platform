@@ -11,9 +11,13 @@ public sealed class RetentionOptions
     public int BatchSize { get; set; } = 100;
     public TimeSpan SweepInterval { get; set; } = TimeSpan.FromHours(1);
 
+    // Longer than Event Grid's 24-hour retry TTL so a document still being retried is not failed early.
+    public TimeSpan StaleProcessingTimeout { get; set; } = TimeSpan.FromHours(26);
+
     public bool IsValid() =>
         RetentionDays >= 1 && BatchSize is >= 1 and <= 1000
-        && SweepInterval >= TimeSpan.FromMinutes(1);
+        && SweepInterval >= TimeSpan.FromMinutes(1)
+        && StaleProcessingTimeout >= TimeSpan.FromHours(1);
 }
 
 public interface IDocumentRetentionOperations
@@ -96,6 +100,24 @@ public sealed class DocumentRetentionWorker(
     internal async Task RunSweepAsync(CancellationToken ct)
     {
         var now = timeProvider.GetUtcNow();
+        try
+        {
+            var timedOut = await metadata.FailStaleAsync(now, _options.StaleProcessingTimeout, _options.BatchSize, ct)
+                .ConfigureAwait(false);
+            if (timedOut > 0)
+            {
+                logger.LogWarning("Marked {Count} stalled documents as Failed (ProcessingTimedOut)", timedOut);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Stale document status sweep failed; it will be retried on the next sweep");
+        }
+
         await metadata.MarkExpiredAsync(now, _options.RetentionDays, _options.BatchSize, ct).ConfigureAwait(false);
 
         var cleanup = await metadata.GetPendingCleanupAsync(_options.BatchSize, ct).ConfigureAwait(false);

@@ -150,8 +150,13 @@ flowchart LR
    the Service Bus message.
 
 HTTP 202 acknowledges storage/acceptance, not completed extraction or indexing.
-The returned `Location` header maps to an owner-scoped status API. The API
-currently reports queued/indexed/deleted, not a detailed failed-extraction state.
+The returned `Location` header is the owner-scoped `GET /documents/{documentId}`
+status API: `queued`, `extracting`, `processing`, `indexed`, `noText`,
+`failed` (with a caller-safe failure code/message/retryable flag), or
+`deleted`. The Extractor publishes `extracting`/`failed` events to the
+`document-status` queue (it cannot reach private SQL); the Worker applies them
+with forward-only transitions and marks documents in flight longer than
+`Retention:StaleProcessingTimeout` (26 hours) as `failed`/`ProcessingTimedOut`.
 
 ### Failure and replay behavior
 
@@ -166,7 +171,8 @@ currently reports queued/indexed/deleted, not a detailed failed-extraction state
 - Deterministic Search keys and the SQL transactional upsert support redelivery
   of the same document. Re-uploading a file assigns a new document ID; it is not
   file-content deduplication.
-- Documents with no extractable text are logged and skipped without a SQL row.
+- Documents with no extractable text get the explicit terminal `noText` status
+  (SQL row with zero chunks); nothing is indexed.
 
 Implementation: [Extractor](../../src/DocIntake.Extractor/ExtractDocument.cs),
 [Worker](../../src/DocIntake.Worker/IngestionWorker.cs),
@@ -248,12 +254,17 @@ are in the SQL region.
 - Event Grid system-topic identity: Storage Blob Data Contributor at storage
   account scope for dead-letter authorization. This access is broader than a
   single container.
-- SQL access also requires a contained Worker database user and database roles.
-  Azure resource Contributor/Owner does not grant database access.
-- Target SQL administrator is the `DocIntake-Sql-Admins` Entra group. Membership
-  and the actual server administrator/authentication state must be verified in
-  Azure; past troubleshooting found drift to an individual guest administrator
-  and Entra-only authentication disabled.
+- SQL access uses dedicated user-assigned identities (`<prefix>-api-sql`,
+  `<prefix>-worker-sql`). The migration job creates their contained database
+  users and adds them to the `docintake_api`/`docintake_worker` roles. Azure
+  resource Contributor/Owner does not grant database access.
+- The migration job runs as `<prefix>-sql-migrator`, which must be a member of
+  the SQL admin group (one-time prerequisite).
+- SQL administrator is the `DocIntake-Sql-Admins` Entra group. Past
+  troubleshooting found drift to an individual guest administrator and
+  Entra-only authentication disabled; every deployment now logs the current
+  state, re-applies the group administrator and Entra-only authentication
+  through child resources, and fails if the result does not match.
 
 ### SQL network configuration
 
@@ -281,12 +292,20 @@ The [pipeline](../../infra/azure-pipelines.yml) performs:
 
 1. Install .NET 8; Release build with warnings as errors; solution tests.
 2. Optional first-time infrastructure bootstrap.
-3. Authenticate Docker to ACR, build/push API and Worker on the agent.
-4. Deploy application infrastructure with real images.
-5. Publish/package/deploy Extractor using Flex-aware ZIP deployment.
-6. Poll ARM `properties.state` for Running and list functions for
+3. Detect an existing SQL server and log its Entra admin/Entra-only state.
+4. Authenticate Docker to ACR, build/push API, Worker, and migration images on
+   the agent.
+5. Deploy infrastructure and the `<prefix>-db-migrate` Container Apps Job while
+   the API and Worker keep their currently running images; verify SQL
+   authentication converged to the admin group with Entra-only enabled.
+6. Ensure the migrator identity is in the SQL admin group, start the migration
+   job, and wait (up to 35 minutes). Failure prints the job logs and stops the
+   release before application images change.
+7. Deploy the new API and Worker images.
+8. Publish/package/deploy Extractor using Flex-aware ZIP deployment.
+9. Poll ARM `properties.state` for Running and list functions for
    `ExtractDocument`: 30 attempts with 10-second waits, plus command duration.
-7. Redeploy with Event Grid enabled only after readiness passes.
+10. Redeploy with Event Grid enabled only after readiness passes.
 
 Normal releases use **`provisionInfrastructure=false`**. Bootstrap is only for
 an empty environment: it uses a public sample API image and can replace a
@@ -302,12 +321,19 @@ Prerequisites not fully automated by the pipeline:
   membership, service connection setup, provider registration, quota approval.
 - Service connection permissions for resource deployment, role assignments,
   identity assignment, and ACR push.
-- SQL schema and contained Worker user/role grants from
-  [schema.sql](../../sql/schema.sql), executed by an authorized database administrator.
-- SQL authentication transitions for an existing server: inline
-  `azureADOnlyAuthentication: true` updates previously failed. No dedicated
-  existing-server migration has been implemented; verify Entra connectivity and
-  actual authentication state before changes.
+- One-time: add the `<prefix>-sql-migrator` identity to the SQL admin group
+  (`az ad group member add --group <sqlAdminGroupObjectId> --member-id
+  <sqlMigratorPrincipalId>`). The pipeline attempts this itself and prints the
+  command if the service connection cannot manage the group.
+- Before the first release with status events, drain or intentionally
+  disposition old `extracted-documents` messages.
+
+Schema, application users, and grants are applied automatically by the
+migration job from the versioned scripts in [sql/migrations](../../sql/migrations);
+an edited, already-applied script fails the run. Existing-server SQL
+authentication is converged by the `administrators` and
+`azureADOnlyAuthentications` child resources rather than the create-only inline
+block.
 
 Deployment scripts:
 [infrastructure/images](../../scripts/deploy-azure.sh),
@@ -442,11 +468,10 @@ access tokens, keys, connection strings, or sensitive document content.
 |---|---|---|
 | High | Live claim-check verification | Deploy Extractor/Worker and ingest a large non-sensitive document; confirm owner/document metadata checks, indexing, and queue settlement |
 | High before production | Deploy and verify private SQL networking | Review VNet CIDRs, migrate/recreate existing Container Apps environment if needed, deploy private endpoint/DNS, verify API/Worker SQL connectivity and public access denial |
-| High | Existing SQL authentication drift/migration | Verify group admin and Entra-only state; support repeat deployments without weakening authentication or losing admin access |
+| High | Live SQL migration and authentication verification | Run the pipeline against the existing server; confirm the drift report, converged group admin/Entra-only state, migrator group membership, successful migration job, and API/Worker SQL access through their new identities |
 | Medium | Remove temporary firewall exceptions | Inventory/remove only obsolete named test rules after stable access is verified |
 | Medium | Complete and activate Chat/RAG | Replace embedding/retrieval placeholders, implement grounded answers, obtain quota, then enable and verify `/ask`, citations, cost and safety |
-| Medium | Complete document status/failure states | Add processing/failed states and user-visible extraction failure handling; current status is queued/indexed/deleted |
-| Medium | Empty-text UX | Define explicit no-text status instead of relying on warning and absent SQL row |
+| Medium | Live document status verification | Observe `extracting`, `processing`, `indexed`, `noText`, an `UnsupportedContent` failure, and a stale-processing timeout in Azure |
 | Medium | Failure/cost alerts | Validate alerts for queue backlog, both dead-letter destinations, Worker failures, extraction errors, and budget notification delivery |
 | Medium | Failure/replay testing | Prove retry/idempotency under lock loss, dependency failure, duplicate replay, and recovery; Search and SQL can diverge temporarily |
 | Medium | Load/quota tests | Measure concurrent uploads, latency, embeddings TPM throttling, queue growth, scaling, service limits, and spend |
@@ -473,5 +498,5 @@ ingestion is not a security or production-readiness approval.
 - [Infrastructure template](../../infra/main.bicep)
 - [Environment parameters](../../infra/main.bicepparam)
 - [Pipeline](../../infra/azure-pipelines.yml)
-- [SQL schema and grants](../../sql/schema.sql)
+- [SQL migrations](../../sql/migrations)
 - [Cost guardrails](../runbooks/cost-guardrails.md)

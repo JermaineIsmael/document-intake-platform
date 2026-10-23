@@ -108,7 +108,8 @@ public static class DocumentEndpoints
         }
 
         logger.LogInformation("Document upload accepted: {DocumentId}, {FileSizeBytes} bytes", documentId, file.Length);
-        return Results.Accepted($"/documents/{documentId:D}", new DocumentAccepted(documentId, "queued"));
+        return Results.Accepted($"/documents/{documentId:D}",
+            new DocumentAccepted(documentId, DocumentStatusPresenter.ToApiValue(DocumentStatus.Queued)));
     }
 
     private static async Task<IResult> GetAsync(
@@ -131,7 +132,8 @@ public static class DocumentEndpoints
         }
         catch (Exception exception) when (exception is Microsoft.Data.SqlClient.SqlException or InvalidOperationException)
         {
-            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            return Results.Json(new { error = "Document status is temporarily unavailable. Please retry." },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
         if (document is null)
@@ -139,19 +141,7 @@ public static class DocumentEndpoints
             return Results.NotFound();
         }
 
-        var status = document.DeletedAt is not null ? "deleted"
-            : document.ChunkCount > 0 ? "indexed"
-            : "queued";
-        return Results.Ok(new
-        {
-            documentId,
-            status,
-            document.ChunkCount,
-            document.CreatedAt,
-            document.IndexedAt,
-            document.DeletedAt,
-            document.RecoverableUntil
-        });
+        return Results.Ok(DocumentStatusPresenter.ToResponse(documentId, document));
     }
 
     private static async Task<IResult> DeleteAsync(

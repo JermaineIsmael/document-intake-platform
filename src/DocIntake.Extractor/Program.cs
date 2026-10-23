@@ -3,6 +3,7 @@ using Azure.Core;
 using Azure.Identity;
 using Azure.Messaging.ServiceBus;
 using Azure.Storage.Blobs;
+using DocIntake.Extractor;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -21,6 +22,7 @@ var host = new HostBuilder()
         }
         var serviceBusNamespace = context.Configuration["ServiceBus:Namespace"];
         var queueName = context.Configuration["ServiceBus:QueueName"] ?? "extracted-documents";
+        var statusQueueName = context.Configuration["ServiceBus:StatusQueueName"] ?? "document-status";
         if (!Uri.TryCreate(documentIntelligenceEndpoint, UriKind.Absolute, out var endpoint)
             || endpoint.Scheme != Uri.UriSchemeHttps)
         {
@@ -41,6 +43,9 @@ var host = new HostBuilder()
         services.AddSingleton(_ => new ServiceBusClient(serviceBusNamespace, credential));
         services.AddSingleton(serviceProvider =>
             serviceProvider.GetRequiredService<ServiceBusClient>().CreateSender(queueName));
+        services.AddSingleton<IDocumentStatusPublisher>(serviceProvider =>
+            new ServiceBusDocumentStatusPublisher(
+                serviceProvider.GetRequiredService<ServiceBusClient>().CreateSender(statusQueueName)));
         services.AddApplicationInsightsTelemetryWorkerService();
         services.ConfigureFunctionsApplicationInsights();
     })

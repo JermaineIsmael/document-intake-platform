@@ -6,6 +6,7 @@ set -euo pipefail
 : "${EXTRACTOR_PACKAGE:?Extractor ZIP package path was not provided}"
 : "${API_IMAGE:?API image was not passed from the infrastructure deployment}"
 : "${WORKER_IMAGE:?Worker image was not passed from the infrastructure deployment}"
+: "${MIGRATION_IMAGE:?Migration image was not passed from the infrastructure deployment}"
 
 if [[ -z "${EXTRACTOR_NAME:-}" ]]; then
   echo "Extractor Function App name was not set by the infrastructure deployment." >&2
@@ -65,7 +66,9 @@ az deployment group what-if \
     bootstrap=false \
     bootstrapExtractor=false \
     apiImage="$API_IMAGE" \
-    workerImage="$WORKER_IMAGE"
+    workerImage="$WORKER_IMAGE" \
+    migrationImage="$MIGRATION_IMAGE" \
+    sqlServerExists=true
 
 echo "Enabling Event Grid delivery to ExtractDocument..."
 az deployment group create \
@@ -75,4 +78,6 @@ az deployment group create \
     bootstrap=false \
     bootstrapExtractor=false \
     apiImage="$API_IMAGE" \
-    workerImage="$WORKER_IMAGE"
+    workerImage="$WORKER_IMAGE" \
+    migrationImage="$MIGRATION_IMAGE" \
+    sqlServerExists=true

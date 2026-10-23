@@ -227,6 +227,91 @@ public sealed class UploadTests
         original.Storage.Uploads.Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task Location_returned_by_upload_reports_queued_status()
+    {
+        await using var factory = new UploadFactory();
+        using var client = factory.CreateClient();
+        using var content = new MultipartFormDataContent();
+        content.Add(new ByteArrayContent("%PDF-test"u8.ToArray()), "file", "test.pdf");
+        using var upload = await client.PostAsync("/documents", content);
+        upload.StatusCode.Should().Be(HttpStatusCode.Accepted);
+
+        using var response = await client.GetAsync(upload.Headers.Location);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var status = await response.Content.ReadFromJsonAsync<DocumentStatusResponse>();
+        status!.Status.Should().Be("queued");
+        status.ProcessingStatus.Should().Be("queued");
+        status.StatusUpdatedAt.Should().NotBeNull();
+        status.Failure.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(DocumentStatus.Extracting, null, "extracting")]
+    [InlineData(DocumentStatus.Processing, null, "processing")]
+    [InlineData(DocumentStatus.Indexed, null, "indexed")]
+    [InlineData(DocumentStatus.NoText, null, "noText")]
+    public async Task Status_endpoint_reports_each_processing_state(
+        DocumentStatus state, string? failureCode, string expected)
+    {
+        await using var factory = new UploadFactory();
+        using var client = factory.CreateClient();
+        var documentId = await UploadAsync(client);
+        factory.Services.GetRequiredService<IDocumentMetadataStore>().Should()
+            .BeOfType<InMemoryDocumentMetadataStore>().Which
+            .TrySetStatus(documentId, state, failureCode, DateTimeOffset.UtcNow,
+                state == DocumentStatus.Indexed ? 3 : 0).Should().BeTrue();
+
+        var status = await client.GetFromJsonAsync<DocumentStatusResponse>($"/documents/{documentId}");
+
+        status!.Status.Should().Be(expected);
+        status.Failure.Should().BeNull();
+        status.ChunkCount.Should().Be(state == DocumentStatus.Indexed ? 3 : 0);
+    }
+
+    [Fact]
+    public async Task Failed_status_exposes_only_a_caller_safe_failure()
+    {
+        await using var factory = new UploadFactory();
+        using var client = factory.CreateClient();
+        var documentId = await UploadAsync(client);
+        ((InMemoryDocumentMetadataStore)factory.Services.GetRequiredService<IDocumentMetadataStore>())
+            .TrySetStatus(documentId, DocumentStatus.Failed, DocumentFailureCodes.UnsupportedContent, DateTimeOffset.UtcNow);
+
+        using var response = await client.GetAsync($"/documents/{documentId}");
+        var body = await response.Content.ReadAsStringAsync();
+        var status = System.Text.Json.JsonSerializer.Deserialize<DocumentStatusResponse>(
+            body, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+
+        status!.Status.Should().Be("failed");
+        status.Failure.Should().BeEquivalentTo(new DocumentFailure(
+            DocumentFailureCodes.UnsupportedContent,
+            "The document could not be read. Upload a valid, unencrypted PDF or DOCX file.",
+            false));
+        body.Should().NotContain("Exception").And.NotContain("ownerId");
+    }
+
+    [Fact]
+    public async Task Unknown_document_returns_404()
+    {
+        await using var factory = new UploadFactory();
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync($"/documents/{Guid.NewGuid()}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    private static async Task<string> UploadAsync(HttpClient client)
+    {
+        using var content = new MultipartFormDataContent();
+        content.Add(new ByteArrayContent("%PDF-test"u8.ToArray()), "file", "test.pdf");
+        using var upload = await client.PostAsync("/documents", content);
+        upload.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        return (await upload.Content.ReadFromJsonAsync<DocumentAccepted>())!.DocumentId.ToString("D");
+    }
+
     private sealed class UploadFactory(int maxFileSizeMb = 25) : WebApplicationFactory<Program>
     {
         public StorageHandler Storage { get; } = new();

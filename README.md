@@ -50,8 +50,8 @@ instructions, not proof that every planned sprint outcome was delivered.
 | Document Intelligence text extraction | Implemented | Extracted text is passed to downstream ingestion |
 | Extracted-text queue messaging | Implemented | Service Bus carries a compact claim-check reference; extracted text remains in a private Blob container |
 | Large-text claim-check messaging | Implemented | Extractor stores complete text in Blob; Worker validates document/owner metadata before download; not yet live-tested |
-| Empty-text handling | Partial | Worker logs a warning and skips indexing/SQL; explicit user-visible no-text status is absent |
-| Document lifecycle/status API | Partial | Owner-scoped status reports queued/indexed/deleted; processing/failed states and user-visible extraction failures are not modeled |
+| Empty-text handling | Implemented | A document with no usable text is persisted with the explicit terminal `noText` status instead of being skipped; not yet live-tested |
+| Document lifecycle/status API | Implemented | Owner-scoped `GET /documents/{documentId}` reports `queued`, `extracting`, `processing`, `indexed`, `noText`, `failed`, or `deleted`, with a caller-safe failure code/message/retryable flag; stale in-flight documents time out to `failed`; not yet live-tested |
 | Document ownership and tenant isolation | Implemented in code | Entra `oid` is persisted and owner-scoped status/delete/restore endpoints return no access to other owners; legacy null-owner records remain inaccessible; live authorization test pending |
 
 ### Worker, Search, and SQL
@@ -95,9 +95,9 @@ instructions, not proof that every planned sprint outcome was delivered.
 | Extractor publish/readiness gate | Implemented | Deployment script polls ARM state and indexed `ExtractDocument` before Event Grid activation |
 | Azure DevOps deployment pipeline | Implemented | Build/tests, image publishing, app updates, Function deployment, and optional infrastructure provisioning |
 | Manual deployment and extraction smoke tooling | Implemented | Scripts and commands supplement pipeline deployment |
-| SQL schema and identity grants | Partial | One-time SQL script exists; administrator execution remains manual |
-| Automated SQL schema/grant migrations | Not implemented | Pipeline does not execute database bootstrap/migrations |
-| Existing-server SQL authentication transition | Partial | Entra configuration and manual remediation exist; safe repeatable migration/drift handling remains |
+| SQL schema and identity grants | Implemented | Versioned migrations create the schema, least-privilege roles, and API/Worker contained users; one-time prerequisite: add the migrator identity to the SQL admin group |
+| Automated SQL schema/grant migrations | Implemented, not deployed | A VNet-integrated Container Apps Job applies checksummed migrations; the pipeline waits for it and deploys new application images only after it succeeds |
+| Existing-server SQL authentication transition | Implemented, not deployed | Pipeline detects an existing server, logs its admin/Entra-only state, converges it through the `administrators` and `azureADOnlyAuthentications` child resources, and fails if the result does not match |
 | Development SQL firewall opt-in | Implemented | Broad Azure-services access enabled in dev; authentication/database permissions still required |
 | Restricted SQL connectivity | Implemented in Bicep, not deployed | VNet-integrated Container Apps, SQL private endpoint/private DNS, and disabled SQL public access; plan address space, migrate/recreate existing Container Apps environment, and verify private connectivity before release |
 | Temporary firewall-rule cleanup | Partial | Stable development access restored; inventory/removal of obsolete test exceptions remains |
@@ -148,7 +148,7 @@ alongside the latest report.
 - [DocIntake.Worker](src/DocIntake.Worker): .NET 8 worker service for chunking, embedding, and indexing (Sprint 3).
 - [DocIntake.Tests](tests/DocIntake.Tests): xUnit and FluentAssertions integration tests.
 - [Infrastructure](infra/main.bicep): resource-group-scoped Azure deployment.
-- [SQL schema](sql/schema.sql): one-time Entra-admin script for metadata tables and the worker user.
+- [SQL migrations](sql/migrations): versioned, checksummed schema and grant scripts applied by [DocIntake.Migrations](src/DocIntake.Migrations) as a Container Apps Job during deployment.
 - [Container App module](infra/modules/containerApp.bicep): reusable managed-identity container app.
 
 The existing Git repository is used as the solution root. Projects reference
@@ -315,9 +315,37 @@ Each upload gets a new GUID and writes with an If-None-Match condition.
 
 `queued` is the upload API's acceptance status; extraction and queue delivery
 happen asynchronously through the Sprint 2 pipeline described below. The API
-does not wait for Document Intelligence or Service Bus. Owner-scoped
-`GET /documents/{documentId}` returns the current queued/indexed/deleted status;
-it does not yet expose a detailed extraction-failure state.
+does not wait for Document Intelligence or Service Bus.
+
+### Document status
+
+Owner-scoped `GET /documents/{documentId}` (the upload's `Location`) returns
+the document's lifecycle state. Other owners and unknown IDs receive 404.
+
+```json
+{"documentId":"<guid>","status":"failed","processingStatus":"failed",
+ "statusUpdatedAt":"...","chunkCount":0,"createdAt":"...","indexedAt":null,
+ "deletedAt":null,"recoverableUntil":null,
+ "failure":{"code":"UnsupportedContent","message":"The document could not be read. Upload a valid, unencrypted PDF or DOCX file.","retryable":false}}
+```
+
+| Status | Meaning |
+|---|---|
+| `queued` | Accepted and stored; extraction has not started |
+| `extracting` | The Extractor is running Document Intelligence |
+| `processing` | The Worker is chunking, embedding, and indexing |
+| `indexed` | Terminal: searchable chunks exist (`chunkCount` > 0) |
+| `noText` | Terminal: extraction succeeded but produced no usable text; nothing was indexed |
+| `failed` | Terminal: see `failure` (`UnsupportedContent`, `ExtractionFailed`, `IndexingFailed`, `InvalidMessage`, or `ProcessingTimedOut`) |
+| `deleted` | Owner-deleted or retention-expired; `processingStatus` keeps the last processing state and `recoverableUntil` the restore deadline |
+
+Failure messages are fixed, caller-safe text; exception details stay in logs.
+The Extractor cannot reach the private SQL server, so it publishes `extracting`
+and `failed` events to the `document-status` Service Bus queue and the Worker
+applies them. Transitions only move forward, so late or duplicate events are
+ignored; `indexed`/`noText` supersede an earlier failure. Documents still in
+flight after `Retention:StaleProcessingTimeout` (default 26 hours) are marked
+`failed` with `ProcessingTimedOut` by the Worker's hourly sweep.
 
 ### Testing Entra authentication locally
 
@@ -520,10 +548,55 @@ serviceBusNamespace, documentIntelligenceEndpoint, and extractorName.
 ### Deploy with Azure Pipelines
 
 The [azure-pipelines.yml](infra/azure-pipelines.yml) pipeline is the deployment
-entrypoint. It builds and tests the solution, provisions the Bicep resources,
-builds the API and Worker images with Docker on the pipeline agent and pushes
-them to ACR, deploys the Extractor package, and only
-then enables the Event Grid subscription.
+entrypoint. It builds and tests the solution, builds the API, Worker, and
+database migration images with Docker on the pipeline agent and pushes them to
+ACR, then deploys in two phases: (1) infrastructure and the migration job while
+the API and Worker keep their currently running images, then runs the
+migration job and waits for it; (2) only after a successful migration, the new
+API and Worker images. It then deploys the Extractor package and only then
+enables the Event Grid subscription.
+
+#### Database migrations
+
+[DocIntake.Migrations](src/DocIntake.Migrations) applies the embedded scripts
+in [sql/migrations](sql/migrations) in version order. Each script runs in a
+transaction under an application lock and is recorded with its SHA-256
+checksum in `dbo.SchemaVersions`; an applied script that was later edited
+fails the run (add a new script instead). It then creates contained users for
+the `<prefix>-api-sql` and `<prefix>-worker-sql` user-assigned identities from
+their client IDs (no Microsoft Graph permission required) and adds them to the
+`docintake_api`/`docintake_worker` roles. The API and Worker connect to SQL with
+those identities (`Sql__ManagedIdentityClientId`).
+
+SQL has no public network access, so the runner is the `<prefix>-db-migrate`
+Container Apps Job in the VNet-integrated environment, using the
+`<prefix>-sql-migrator` identity. **One-time prerequisite per environment:** that
+identity must be a member of the SQL Entra admin group. The pipeline checks and
+tries to add it; if the service connection cannot manage the group, it fails
+and prints the command for a group owner:
+
+```bash
+az ad group member add --group <sqlAdminGroupObjectId> --member-id <sqlMigratorPrincipalId>
+```
+
+A new membership can take several minutes to apply to SQL logins; rerun the
+pipeline if the first migration fails to log in. A failed migration stops the
+pipeline before the applications are updated and prints the job's logs.
+
+Before the first release with the status pipeline, drain or intentionally
+disposition `extracted-documents` messages produced by older Extractor builds.
+
+#### SQL authentication drift
+
+The pipeline detects whether the SQL server exists and logs its current Entra
+administrator and Entra-only state. For an existing server, Bicep omits the
+create-only inline `administrators` block and instead deploys the
+`administrators/ActiveDirectory` child (the configured admin group) followed by
+`azureADOnlyAuthentications/Default` (true), so drift such as a user or another
+group set as administrator, or SQL authentication re-enabled, is corrected on
+every run. After deployment the pipeline verifies that the administrator SID
+equals `sqlAdminGroupObjectId` and Entra-only authentication is enabled, and
+fails otherwise.
 
 Configure these Azure DevOps pipeline variables before running it:
 
@@ -585,7 +658,8 @@ The Worker attaches a dedicated user-assigned identity named
 `<prefix>-worker-pull` for private ACR image pulls. Its `AcrPull` assignment is
 created before the Worker module runs, avoiding a first-deployment dependency
 on the Worker's system identity becoming available. The system identity remains
-in use for application access, Service Bus scaling, and SQL grants; existing
+in use for application access and Service Bus scaling; SQL access uses the
+separate `<prefix>-worker-sql` user-assigned identity. Existing
 system-identity role assignments are preserved. The service connection also
 needs permission to create and assign user-assigned managed identities (included
 in Contributor at the resource-group scope). New RBAC assignments can take time
@@ -646,9 +720,10 @@ The Worker Container App uses its managed identity to scale from the Service
 Bus queue via `custom.identity = 'system'` on the scale rule, not a
 `useManagedIdentity` metadata property. The identity requires the existing
 Azure Service Bus Data Receiver role assignment.
-After deployment, create its SQL database user
-and grant database roles using [sql/schema.sql](sql/schema.sql); that SQL
-operation is not performed by the pipeline.
+The SQL schema, the API/Worker contained database users, and their
+least-privilege role grants are applied by the database migration job during
+every pipeline run (see [Database migrations](#database-migrations)); no
+manual SQL script is required after the one-time admin-group prerequisite.
 
 ### 1. Prepare
 
@@ -657,16 +732,19 @@ supports Container Apps. The deployer needs resource creation permissions and
 permission to create role assignments (for example, Contributor plus Role
 Based Access Control Administrator, or Owner, at the resource-group scope).
 The image publisher needs permission to build/push into ACR.
-Ensure the Microsoft.App, Microsoft.ContainerRegistry, Microsoft.Storage,
-Microsoft.OperationalInsights, Microsoft.Insights, and Microsoft.KeyVault
-resource providers are registered in the subscription. For a new subscription,
-after selecting it, an administrator can register them with:
+Ensure every resource provider used by `infra/main.bicep` is registered in the
+subscription, including Microsoft.Network (VNet, private endpoint, private DNS)
+and Microsoft.Sql. `scripts/deploy-azure.sh` registers missing providers before
+deploying, but this requires subscription-level register permission for the
+pipeline service connection. Otherwise, after selecting the subscription, an
+administrator can register them with:
 
 ```powershell
 foreach ($provider in @('Microsoft.App', 'Microsoft.ContainerRegistry',
     'Microsoft.Storage', 'Microsoft.OperationalInsights', 'Microsoft.Insights',
     'Microsoft.KeyVault', 'Microsoft.ServiceBus', 'Microsoft.CognitiveServices',
-    'Microsoft.EventGrid', 'Microsoft.Web')) {
+    'Microsoft.EventGrid', 'Microsoft.Web', 'Microsoft.Network', 'Microsoft.Sql',
+    'Microsoft.Search', 'Microsoft.ManagedIdentity', 'Microsoft.Consumption')) {
     az provider register --namespace $provider --wait
     if ($LASTEXITCODE -ne 0) { throw "Provider registration failed: $provider" }
 }
@@ -1160,41 +1238,22 @@ sprints, keeping the existing API image and `bootstrapExtractor` values.
 
 ### Create the SQL schema
 
-The SQL server has no firewall rules by default and has no SQL logins, so
-connect with Entra authentication as a member of the admin group. Allow your
-client IP, then run [sql/schema.sql](sql/schema.sql).
-
-Use the modern Go-based `sqlcmd` (`winget install sqlcmd`), which supports
-Entra authentication methods. The legacy ODBC `sqlcmd` that ships with SQL
-Server tools does **not** support `--authentication-method`; with it, use
-`-G` plus a separately installed ODBC driver, or use a GUI client instead.
+Deployed environments do not use this section: the pipeline's migration job
+applies [sql/migrations](sql/migrations) automatically (see
+[Database migrations](#database-migrations)). For a local or manual run, the
+same runner can be executed by an admin-group member with VNet connectivity to
+the private SQL endpoint. It uses `DefaultAzureCredential` (your `az login`):
 
 ```powershell
-$deployment = '<deployment name>'
-$sqlServer = az deployment group show --name $deployment `
-  --resource-group $resourceGroup --query properties.outputs.sqlServerFqdn.value -o tsv
-$myIp = (Invoke-RestMethod https://api.ipify.org)
-az sql server firewall-rule create --resource-group $resourceGroup `
-  --server $sqlServer.Split('.')[0] --name local-dev `
-  --start-ip-address $myIp --end-ip-address $myIp
-
-# Uses your az login / Visual Studio identity (no prompt)...
-sqlcmd -S $sqlServer -d docintake --authentication-method ActiveDirectoryDefault `
-  -i sql\schema.sql
-# ...or a browser sign-in:
-sqlcmd -S $sqlServer -d docintake --authentication-method ActiveDirectoryInteractive `
-  -U <your UPN> -i sql\schema.sql
+$env:Sql__Server = '<sqlServerFqdn>'
+$env:Sql__Database = 'docintake'
+dotnet run --project src\DocIntake.Migrations            # apply pending migrations
+dotnet run --project src\DocIntake.Migrations -- --verify  # report drift without changes
 ```
 
-GUI alternative: SQL Server Management Studio or the VS Code **SQL Server
-(mssql)** extension, connecting to `$sqlServer`, database `docintake`, with
-**Microsoft Entra ID - Universal with MFA** authentication, then running the
-script. (Azure Data Studio was retired; use SSMS or the VS Code extension.)
-
-Before running the script, replace `<worker-identity-name>` or remove the
-worker-user section. In Sprint 3 the worker runs under your own Entra identity
-(admin-group members already have access); in Sprint 4 the placeholder becomes
-the worker Container App's managed identity name.
+Set `Migrations__ApiPrincipalName`/`Migrations__ApiClientId` and
+`Migrations__WorkerPrincipalName`/`Migrations__WorkerClientId` to also create
+the application database users; otherwise only the schema and roles are applied.
 
 ## Sprint 3: Running the worker locally
 
@@ -1396,15 +1455,9 @@ Retrieval and answer generation in the API remain incomplete.
    After verifying the Container App worker is functional, the Sprint 3 local-dev assignments
    can be removed.
 
-6. **SQL database user for Worker** — [sql/schema.sql](sql/schema.sql) includes a placeholder
-   for creating a contained database user from the Worker's managed identity:
-   ```sql
-   CREATE USER [worker-container-app-name] FROM EXTERNAL PROVIDER;
-   ALTER ROLE db_datawriter ADD MEMBER [worker-container-app-name];
-   ALTER ROLE db_datareader ADD MEMBER [worker-container-app-name];
-   ```
-   Run this once the Worker Container App is deployed (Sprint 4) with its real managed identity
-   display name.
+6. **SQL database user for Worker** — superseded. The migration job creates contained users for
+   the dedicated `<prefix>-api-sql` and `<prefix>-worker-sql` user-assigned identities (by client
+   ID, without Microsoft Graph) and adds them to the `docintake_api`/`docintake_worker` roles.
 
 ### Deploying Sprint 4
 
@@ -1462,23 +1515,8 @@ Wait for the deployment to complete. Note the Worker's managed identity display 
 
 #### Step 4: Create the Worker's SQL database user
 
-Copy the Worker's managed identity display name from Step 3. Connect to the SQL database
-as an Entra admin and run the contents of [sql/schema.sql](sql/schema.sql), replacing
-`<worker-identity-name>` with that display name. For example, using `sqlcmd`:
-
-```powershell
-# Get the Worker's display name (usually the Container App name)
-$workerDisplayName = 'docintake-worker'  # or the Container App resource name
-
-# Connect with Entra auth
-sqlcmd -S 'docintake-sqlserver.database.windows.net' -d docintake `
-  -G -U '${env:USERNAME}@${env:USERDOMAIN}' `
-  -i sql/schema.sql
-```
-
-Or in [Azure Data Studio](https://learn.microsoft.com/en-us/azure-data-studio/),
-connect using **Azure Authentication** and paste the SQL from the file manually,
-replacing the placeholder.
+Superseded: the pipeline's database migration job creates the Worker and API database users
+and grants after every infrastructure deployment. See [Database migrations](#database-migrations).
 
 #### Step 5: Upload a document end-to-end
 
