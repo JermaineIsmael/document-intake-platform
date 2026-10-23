@@ -78,10 +78,39 @@ public sealed class ExtractDocument(
                 downloaded.Value.Content,
                 cancellationToken: cancellationToken);
 
+            var sourceBlob = blobServiceClient.GetBlobContainerClient(containerName)
+                .GetBlobClient($"{documentIdSegment}/{pathSegments[^1]}");
+            var properties = await sourceBlob.GetPropertiesAsync(cancellationToken: cancellationToken);
+            if (!properties.Value.Metadata.TryGetValue("ownerId", out var ownerId)
+                || !Guid.TryParse(ownerId, out _)
+                || !properties.Value.Metadata.TryGetValue("createdAt", out var createdAtValue)
+                || !DateTimeOffset.TryParse(createdAtValue, out var createdAt))
+            {
+                throw new InvalidOperationException("Uploaded document is missing valid ownership or creation metadata.");
+            }
+
+            var extractedText = operation.Value.Content ?? string.Empty;
+            var extractedTextContainerName = configuration["Storage:ExtractedTextContainer"] ?? "extracted-text";
+            var extractedTextBlobName = $"{documentId:D}/content.txt";
+            var extractedTextBlob = blobServiceClient.GetBlobContainerClient(extractedTextContainerName)
+                .GetBlobClient(extractedTextBlobName);
+            await extractedTextBlob.UploadAsync(BinaryData.FromString(extractedText), overwrite: true, cancellationToken)
+                .ConfigureAwait(false);
+            await extractedTextBlob.SetMetadataAsync(new Dictionary<string, string>
+            {
+                ["documentId"] = documentId.ToString("D"),
+                ["ownerId"] = ownerId,
+                ["createdAt"] = createdAt.ToString("O")
+            }, cancellationToken: cancellationToken).ConfigureAwait(false);
+
             var message = new DocumentMessage(
                 blobUri.AbsoluteUri,
                 documentId,
-                operation.Value.Content ?? string.Empty);
+                null,
+                ownerId,
+                createdAt,
+                $"{documentId:D}/{pathSegments[^1]}",
+                extractedTextBlobName);
             var serviceBusMessage = new ServiceBusMessage(
                 BinaryData.FromObjectAsJson(message, new JsonSerializerOptions(JsonSerializerDefaults.Web)))
             {
