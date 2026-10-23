@@ -222,6 +222,9 @@ public sealed class AuthenticationTests
                     ["Development:BypassAuth"] = bypass.ToString(),
                     ["Auth:Authority"] = configureAuth ? Issuer : "",
                     ["Auth:Audience"] = configureAuth ? Audience : "",
+                    ["Sql:Server"] = "sql.example",
+                    ["Sql:Database"] = "docintake",
+                    ["Search:Endpoint"] = "https://search.example",
                     ["APPLICATIONINSIGHTS_CONNECTION_STRING"] = ""
                 }));
             builder.ConfigureServices(services =>

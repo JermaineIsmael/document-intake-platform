@@ -255,7 +255,38 @@ public sealed class IngestionWorker(
             return false;
         }
 
-        document = parsed with { Content = parsed.Content ?? string.Empty };
+        if (!Guid.TryParse(parsed.OwnerId, out _))
+        {
+            error = "OwnerId must be a valid Entra object ID.";
+            return false;
+        }
+
+        if (parsed.CreatedAt == default)
+        {
+            error = "CreatedAt is missing.";
+            return false;
+        }
+
+        if (!parsed.SourceBlobName.StartsWith($"{parsed.DocumentId:D}/", StringComparison.Ordinal)
+            || parsed.SourceBlobName.Contains("..", StringComparison.Ordinal)
+            || parsed.SourceBlobName.Contains('\\', StringComparison.Ordinal))
+        {
+            error = "SourceBlobName is outside the document namespace.";
+            return false;
+        }
+
+        var hasInlineContent = parsed.Content is not null;
+        var hasExtractedReference = !string.IsNullOrWhiteSpace(parsed.ExtractedTextBlobName)
+            && parsed.ExtractedTextBlobName.StartsWith($"{parsed.DocumentId:D}/", StringComparison.Ordinal)
+            && !parsed.ExtractedTextBlobName.Contains("..", StringComparison.Ordinal)
+            && !parsed.ExtractedTextBlobName.Contains('\\', StringComparison.Ordinal);
+        if (hasInlineContent == hasExtractedReference)
+        {
+            error = "Exactly one of Content or a valid ExtractedTextBlobName is required.";
+            return false;
+        }
+
+        document = parsed;
         error = string.Empty;
         return true;
     }

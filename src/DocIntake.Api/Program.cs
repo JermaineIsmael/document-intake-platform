@@ -16,6 +16,8 @@ using OpenAI.Chat;
 using OpenTelemetry.Logs;
 
 var builder = WebApplication.CreateBuilder(args);
+var searchEndpoint = builder.Configuration["Search:Endpoint"];
+const string SearchIndexName = "document-chunks";
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -55,16 +57,71 @@ builder.Services.AddSingleton<FileValidator>();
 builder.Services.AddSingleton<BlobContainerClient>(services =>
     DocumentStore.CreateContainerClient(services.GetRequiredService<IConfiguration>(),
         services.GetRequiredService<IHostEnvironment>()));
-builder.Services.AddSingleton<DocumentStore>();
+builder.Services.AddSingleton<ExtractedTextContainerClient>(services =>
+    new ExtractedTextContainerClient(DocumentStore.CreateExtractedTextContainerClient(
+        services.GetRequiredService<IConfiguration>(), services.GetRequiredService<IHostEnvironment>())));
+builder.Services.AddSingleton<DocumentStore>(services =>
+    new DocumentStore(services.GetRequiredService<BlobContainerClient>(),
+        services.GetRequiredService<ExtractedTextContainerClient>().Client));
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddOptions<DocumentLifecycleOptions>()
+    .Bind(builder.Configuration.GetSection("Retention"))
+    .Validate(options => options.RecoveryDays is >= 1 and <= 30,
+        "Retention:RecoveryDays must be between 1 and the configured 30-day Blob soft-delete window.")
+    .ValidateOnStart();
+
+var metadataSqlServer = builder.Configuration["Sql:Server"];
+var metadataSqlDatabase = builder.Configuration["Sql:Database"];
+if (!string.IsNullOrWhiteSpace(metadataSqlServer) && !string.IsNullOrWhiteSpace(metadataSqlDatabase))
+{
+    var sqlConnectionString = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder
+    {
+        DataSource = $"tcp:{metadataSqlServer},1433",
+        InitialCatalog = metadataSqlDatabase,
+        Encrypt = Microsoft.Data.SqlClient.SqlConnectionEncryptOption.Mandatory,
+        TrustServerCertificate = false
+    }.ConnectionString;
+    builder.Services.AddSingleton<IDocumentMetadataStore>(_ =>
+        new SqlDocumentMetadataStore(sqlConnectionString, new DefaultAzureCredential()));
+}
+else if (builder.Environment.IsDevelopment() && builder.Configuration.GetValue<bool>("Development:BypassAuth"))
+{
+    builder.Services.AddSingleton<IDocumentMetadataStore, InMemoryDocumentMetadataStore>();
+}
+else
+{
+    var error = "Sql:Server and Sql:Database must be configured; document APIs are unavailable.";
+    builder.Services.AddSingleton<IDocumentMetadataStore>(_ => new UnavailableDocumentMetadataStore(error));
+}
+builder.Services.AddSingleton<DocumentLifecycleService>();
+
+if (!string.IsNullOrWhiteSpace(searchEndpoint))
+{
+    if (!Uri.TryCreate(searchEndpoint, UriKind.Absolute, out var lifecycleSearchUri)
+        || lifecycleSearchUri.Scheme != Uri.UriSchemeHttps)
+    {
+        throw new InvalidOperationException("Search:Endpoint must be an absolute HTTPS URL.");
+    }
+
+    builder.Services.AddSingleton(_ => new SearchClient(
+        lifecycleSearchUri, SearchIndexName, new DefaultAzureCredential()));
+    builder.Services.AddSingleton<IDocumentIndexLifecycle, SearchDocumentIndexLifecycle>();
+}
+else if (builder.Environment.IsDevelopment() && builder.Configuration.GetValue<bool>("Development:BypassAuth"))
+{
+    builder.Services.AddSingleton<IDocumentIndexLifecycle, NoopDocumentIndexLifecycle>();
+}
+else
+{
+    var error = "Search:Endpoint must be configured; document deletion and restoration are unavailable.";
+    builder.Services.AddSingleton<IDocumentIndexLifecycle>(_ => new UnavailableDocumentIndexLifecycle(error));
+}
 
 // Sprint 4: RAG service for /ask endpoint.
-var searchEndpoint = builder.Configuration["Search:Endpoint"];
 var openAiEndpoint = builder.Configuration["OpenAI:Endpoint"];
 var embeddingDeployment = builder.Configuration["OpenAI:EmbeddingDeployment"];
 var chatDeployment = builder.Configuration["OpenAI:ChatDeployment"];
 var chatEnabled = builder.Configuration.GetValue("OpenAI:ChatEnabled", true);
-const string SearchIndexName = "document-chunks"; // Must match IndexSchema.IndexName in Worker
-
 // Register RAG service only if all config values are present
 var hasRagConfig = chatEnabled && !string.IsNullOrWhiteSpace(searchEndpoint)
     && !string.IsNullOrWhiteSpace(openAiEndpoint)
@@ -85,7 +142,6 @@ if (hasRagConfig)
 
     var credential = new DefaultAzureCredential();
     builder.Services.AddSingleton(_ => new AzureOpenAIClient(openAiUri, credential));
-    builder.Services.AddSingleton(_ => new SearchClient(new Uri(searchEndpoint!), SearchIndexName, credential));
     builder.Services.AddSingleton(services =>
         services.GetRequiredService<AzureOpenAIClient>().GetEmbeddingClient(embeddingDeployment));
     builder.Services.AddSingleton(services =>

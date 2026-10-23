@@ -12,11 +12,15 @@ public sealed class IndexSchemaTests
         var index = IndexSchema.Build();
 
         index.Name.Should().Be("document-chunks");
-        index.Fields.Select(f => f.Name).Should().Equal("id", "content", "source", "contentVector");
+        index.Fields.Select(f => f.Name).Should().Equal(
+            "id", "documentId", "ownerId", "isDeleted", "content", "source", "contentVector");
 
         var id = index.Fields.Single(f => f.Name == "id");
         id.IsKey.Should().BeTrue();
         id.Type.Should().Be(SearchFieldDataType.String);
+        index.Fields.Single(f => f.Name == "documentId").IsFilterable.Should().BeTrue();
+        index.Fields.Single(f => f.Name == "ownerId").IsFilterable.Should().BeTrue();
+        index.Fields.Single(f => f.Name == "isDeleted").IsFilterable.Should().BeTrue();
 
         index.Fields.Single(f => f.Name == "content").IsSearchable.Should().BeTrue();
         index.Fields.Single(f => f.Name == "source").IsFilterable.Should().BeTrue();

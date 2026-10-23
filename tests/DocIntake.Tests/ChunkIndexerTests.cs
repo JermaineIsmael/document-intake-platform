@@ -76,10 +76,31 @@ public sealed class ChunkIndexerTests : IDisposable
     }
 
     [Fact]
+    public async Task Claim_check_message_reads_blob_text_and_indexes_owner_metadata()
+    {
+        var reader = new FakeExtractedTextReader { Text = SyntheticText(1000) };
+        var indexer = CreateIndexer(_services, _metadata, extractedTextReader: reader);
+        var documentId = Guid.NewGuid();
+        var ownerId = Guid.NewGuid().ToString("D");
+        var message = new DocumentMessage(
+            SourceUrl, documentId, null, ownerId, DateTimeOffset.UtcNow,
+            $"{documentId:D}/source.pdf", $"{documentId:D}/content.txt");
+
+        await indexer.IndexAsync(message, CancellationToken.None);
+
+        reader.LastBlobName.Should().Be($"{documentId:D}/content.txt");
+        reader.LastOwnerId.Should().Be(ownerId);
+        _services.Index.Values.Should().OnlyContain(doc =>
+            doc["ownerId"]!.GetValue<string>() == ownerId
+            && !doc["isDeleted"]!.GetValue<bool>()
+            && doc["documentId"]!.GetValue<string>() == documentId.ToString("D"));
+    }
+
+    [Fact]
     public async Task Redelivered_message_is_processed_twice_without_duplicates()
     {
         var message = new DocumentMessage(SourceUrl, Guid.NewGuid(), SyntheticText(5000));
-        var expectedCount = TextChunker.Split(message.Content).Count;
+        var expectedCount = TextChunker.Split(message.Content!).Count;
 
         await _indexer.IndexAsync(message, CancellationToken.None);
         var redelivery = () => _indexer.IndexAsync(message, CancellationToken.None);
@@ -123,7 +144,8 @@ public sealed class ChunkIndexerTests : IDisposable
         FakeAzureServices services,
         IDocumentMetadataRepository metadata,
         int embeddingBatchSize = 100,
-        int searchUploadBatchSize = 250)
+        int searchUploadBatchSize = 250,
+        FakeExtractedTextReader? extractedTextReader = null)
     {
         var openAi = new AzureOpenAIClient(
             new Uri("https://fake-openai.openai.azure.com/"),
@@ -143,6 +165,7 @@ public sealed class ChunkIndexerTests : IDisposable
             openAi.GetEmbeddingClient("text-embedding-3-small"),
             search,
             metadata,
+            extractedTextReader ?? new FakeExtractedTextReader(),
             Options.Create(new ChunkIndexerOptions
             {
                 EmbeddingBatchSize = embeddingBatchSize,
@@ -185,8 +208,12 @@ internal sealed class FakeMetadataRepository : IDocumentMetadataRepository
 
     public int SaveCalls { get; private set; }
 
+    public Task<bool> IsActiveAsync(string documentId, string ownerId, CancellationToken ct) =>
+        Task.FromResult(true);
+
     // Same semantics as the SQL upsert: keyed on documentId, last write wins.
-    public Task SaveAsync(string documentId, string sourceUrl, int chunkCount, CancellationToken ct)
+    public Task SaveAsync(string documentId, string sourceUrl, string sourceBlobName, string ownerId,
+        DateTimeOffset createdAt, int chunkCount, CancellationToken ct)
     {
         lock (_gate)
         {
@@ -195,6 +222,38 @@ internal sealed class FakeMetadataRepository : IDocumentMetadataRepository
         }
 
         return Task.CompletedTask;
+    }
+
+    public Task MarkExpiredAsync(DateTimeOffset now, int retentionDays, int batchSize, CancellationToken ct) =>
+        Task.CompletedTask;
+
+    public Task<IReadOnlyList<RetentionDocument>> GetPendingCleanupAsync(int batchSize, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<RetentionDocument>>([]);
+
+    public Task MarkDeletionProcessedAsync(string documentId, DateTimeOffset processedAt, CancellationToken ct) =>
+        Task.CompletedTask;
+
+    public Task<IReadOnlyList<RetentionDocument>> GetPurgeReadyAsync(
+        DateTimeOffset now, int batchSize, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<RetentionDocument>>([]);
+
+    public Task PurgeAsync(string documentId, CancellationToken ct) => Task.CompletedTask;
+}
+
+internal sealed class FakeExtractedTextReader : IExtractedTextReader
+{
+    public string Text { get; set; } = "fake extracted text";
+    public string? LastBlobName { get; private set; }
+    public string? LastOwnerId { get; private set; }
+
+    public Task<string> ReadAsync(string blobName, Guid documentId, string ownerId, CancellationToken ct) =>
+        ReadCoreAsync(blobName, ownerId);
+
+    private Task<string> ReadCoreAsync(string blobName, string ownerId)
+    {
+        LastBlobName = blobName;
+        LastOwnerId = ownerId;
+        return Task.FromResult(Text);
     }
 }
 

@@ -6,6 +6,7 @@ using Azure.Core.Pipeline;
 using Azure.Storage.Blobs;
 using DocIntake.Api.Configuration;
 using DocIntake.Shared;
+using DocIntake.Api.Services;
 using FluentAssertions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http.Features;
@@ -87,6 +88,8 @@ public sealed class UploadTests
         stored.Headers["x-ms-blob-content-type"].Should().Be(expectedContentType);
         Uri.UnescapeDataString(stored.Headers["x-ms-meta-originalName"]).Should().Be(fileName);
         stored.Headers["x-ms-meta-documentId"].Should().Be(accepted.DocumentId.ToString("D"));
+        stored.Headers["x-ms-meta-ownerId"].Should().Be("00000000-0000-0000-0000-000000000001");
+        DateTimeOffset.TryParse(stored.Headers["x-ms-meta-createdAt"], out _).Should().BeTrue();
         stored.Headers["If-None-Match"].Should().Be("*");
         factory.Logs.Entries.Should().Contain(entry => entry.Level == LogLevel.Information
             && entry.Message.Contains(accepted.DocumentId.ToString("D"))
@@ -247,6 +250,14 @@ public sealed class UploadTests
                         Transport = new HttpClientTransport(Storage),
                         Retry = { MaxRetries = 0 }
                     }));
+                services.RemoveAll<ExtractedTextContainerClient>();
+                services.AddSingleton(new ExtractedTextContainerClient(new BlobContainerClient(
+                    new Uri("https://storage.example/extracted-text"),
+                    new BlobClientOptions
+                    {
+                        Transport = new HttpClientTransport(Storage),
+                        Retry = { MaxRetries = 0 }
+                    })));
                 services.AddSingleton<ILoggerProvider>(Logs);
             });
         }

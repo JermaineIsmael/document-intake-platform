@@ -28,7 +28,7 @@ public class RagServiceTests
         var ragService = new RagService(_embeddingClientMock.Object, _searchClientMock.Object, _chatClientMock.Object, _loggerMock.Object);
 
         // Act & Assert
-        await Assert.ThrowsAsync<ArgumentNullException>(() => ragService.AskAsync(null!, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => ragService.AskAsync(null!, "owner", CancellationToken.None));
     }
 
     [Fact]
@@ -38,7 +38,7 @@ public class RagServiceTests
         var ragService = new RagService(_embeddingClientMock.Object, _searchClientMock.Object, _chatClientMock.Object, _loggerMock.Object);
 
         // Act & Assert
-        await Assert.ThrowsAsync<ArgumentException>(() => ragService.AskAsync("", CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => ragService.AskAsync("", "owner", CancellationToken.None));
     }
 
     [Fact]
@@ -48,7 +48,7 @@ public class RagServiceTests
         var ragService = new RagService(_embeddingClientMock.Object, _searchClientMock.Object, _chatClientMock.Object, _loggerMock.Object);
 
         // Act & Assert
-        await Assert.ThrowsAsync<ArgumentException>(() => ragService.AskAsync("   ", CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => ragService.AskAsync("   ", "owner", CancellationToken.None));
     }
 
     [Fact]

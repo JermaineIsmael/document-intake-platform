@@ -18,6 +18,9 @@ public static class IndexSchema
         Fields =
         {
             new SimpleField("id", SearchFieldDataType.String) { IsKey = true },
+            new SimpleField("documentId", SearchFieldDataType.String) { IsFilterable = true },
+            new SimpleField("ownerId", SearchFieldDataType.String) { IsFilterable = true },
+            new SimpleField("isDeleted", SearchFieldDataType.Boolean) { IsFilterable = true },
             new SearchableField("content"),
             new SimpleField("source", SearchFieldDataType.String) { IsFilterable = true },
             new SearchField("contentVector", SearchFieldDataType.Collection(SearchFieldDataType.Single))
