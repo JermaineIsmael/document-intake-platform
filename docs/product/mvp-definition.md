@@ -22,9 +22,15 @@ losing failed work.
 ## Excluded from this milestone
 
 - Complete natural-language question answering or chat availability.
-- Large extracted text beyond the inline message constraint.
-- Dedicated user web UI, per-document status/read endpoint, multi-tenant isolation.
-- Production SLA, private networking, load guarantees, compliance certification.
+- Dedicated user web UI and detailed processing/failure statuses.
+- Production SLA, load guarantees, compliance certification, backup, and
+  disaster recovery.
+
+Since the prior small-document deployment, owner-scoped lifecycle APIs,
+claim-check messaging, SQL private-networking infrastructure, and retention
+automation have been added in code. They are not evidence for this original
+deployed MVP and still require deployment/live verification; claim-check removes
+the old inline Service Bus payload limit from the new implementation.
 
 ## Acceptance criteria
 
@@ -33,17 +39,18 @@ losing failed work.
 | MVP-01 | Authenticated valid upload gives 202 and stored original | Confirmed uploads |
 | MVP-02 | Unauthenticated protected request gives 401 | Confirmed invalid-token case |
 | MVP-03 | Extractor processes event and publishes small content | Confirmed by downstream processing |
-| MVP-04 | Worker creates matching Search chunks and SQL metadata | SQL one-chunk result observed; direct Search check pending |
-| MVP-05 | Successful message is completed without new dead letter | Final queue settlement evidence pending |
-| MVP-06 | Failed work remains diagnosable and replayable | Dead-letter inspection demonstrated; successful recovery pending |
+| MVP-04 | Worker creates matching Search chunks and SQL metadata | Seven accepted SQL rows each match one Search chunk in supplied evidence |
+| MVP-05 | Successful message is completed without new dead letter | Latest supplied queue and dead-letter counts are zero; not an audit of every settlement |
+| MVP-06 | Failed work remains diagnosable and replayable | Dead-letter inspection performed; six historical items have matching evidence and two were intentionally deleted/excluded |
 | MVP-07 | Pipeline deploys real app without manual secret injection | Successful run observed; manual identity/SQL steps documented |
 | MVP-08 | Limits and development access trade-offs disclosed | Documented; not resolved production constraints |
 
 ## Exit decision
 
-The milestone is **partially verified**, not fully signed off. Close Search and
-settlement checks and demonstrate one recovery before declaring the ingestion
-MVP accepted. Automated tests alone cannot establish Azure data-plane access.
+The small-document end-to-end verification is complete for the seven accepted
+samples; historical dead-letter follow-up is closed by disposition. This does
+not constitute a complete failure-recovery exercise or production sign-off.
+Automated tests alone cannot establish Azure data-plane access.
 
 Production or RAG acceptance needs additional explicit requirements and evidence.
 See [requirements](product-requirement.md),

@@ -10,6 +10,7 @@ sequenceDiagram
     participant C as Client
     participant A as API
     participant B as Blob Storage
+    participant X as Extracted-text Blob
     participant E as Event Grid
     participant F as Extractor
     participant D as Document Intelligence
@@ -26,8 +27,10 @@ sequenceDiagram
     F->>B: Download original
     F->>D: prebuilt-read
     D-->>F: Extracted text
-    F->>Q: DocumentMessage
+    F->>X: Store extracted text with owner metadata
+    F->>Q: DocumentMessage claim-check reference
     Q->>W: PeekLock delivery
+    W->>X: Validate document/owner metadata and download text
     W->>O: Embed text chunks
     W->>S: Upload chunks and vectors
     W->>SQL: Upsert document metadata
@@ -39,16 +42,19 @@ sequenceDiagram
 | Stage | Representation |
 |---|---|
 | Upload response | `documentId` GUID and `status: queued` |
-| Original blob | `documents/<guid>/<sanitized-file-name>` |
+| Original blob | `documents/<guid>/<sanitized-file-name>` with owner and creation metadata |
 | Event | BlobCreated URL; documents-container subject filter |
-| Queue body | JSON `sourceUrl`, `documentId`, `content` |
+| Extracted text | `extracted-text/<guid>/content.txt`, private Blob with document/owner metadata |
+| Queue body | JSON source, document ID, owner ID, creation time, original blob name, and extracted-text reference |
 | Queue identity | MessageId equals document GUID |
-| Search key | `<guid>-<zero-based-chunk-index>` |
-| SQL key | Original GUID as `Id` |
+| Search key | `<guid>-<zero-based-chunk-index>` with owner ID and deletion marker |
+| SQL key | Original GUID as `Id`, with owner and lifecycle timestamps |
 
 Chunking uses 800 characters with 100-character overlap. Embeddings use
 1536 dimensions. The Search `source` field is filterable and stores the original
-blob URL. SQL stores metadata, not original bytes or extracted text.
+blob URL. SQL stores metadata, not original bytes or extracted text. Owner ID
+comes from the authenticated Entra `oid` claim; lifecycle API operations scope
+database reads and writes to that owner.
 
 ## Retry and consistency boundaries
 
@@ -60,21 +66,24 @@ blob URL. SQL stores metadata, not original bytes or extracted text.
 - Search upserts deterministic IDs; SQL upserts the document key. Same-document
   replay is designed to converge without duplicate rows/chunk IDs.
 - SQL failure after Search upload leaves partial cross-store completion.
-- Empty-text processing is skipped, so absence of a SQL row can indicate no
-  text, not necessarily a queue failure.
+- Empty-text processing is skipped, so absence of an indexed SQL row can
+  indicate no text, not necessarily a queue failure.
+- Owner deletion hides Search chunks, soft-deletes both blobs, and sets a
+  30-day recovery deadline. The owner may restore within that window.
+- The Worker runs a configurable hourly sweep; at 90-day expiry it soft-deletes
+  blobs and purges Search/SQL metadata. Blob soft-delete remains for up to 30
+  days, but the application restore window has expired. This is not backup or
+  disaster recovery.
 
 Event Grid dead letters live in Blob Storage. Service Bus dead letters live
 in its queue subqueue. Neither should be silently discarded during recovery.
 
-## Known data-volume constraint
+## Claim-check boundaries
 
-The queue contains inline text. Service Bus Standard has a 256 KB message limit
-including overhead; batch admission can reject extracted content regardless of
-the original PDF's file size.
-
-Proposed, not implemented: store extracted text privately and send a blob
-reference (claim-check pattern), with validated references, identity access,
-retention, replay compatibility, and contract tests.
+The queue now contains only a validated extracted-text Blob reference rather
+than the extracted text itself. The Worker enforces the document-specific blob
+path and verifies document and owner metadata before downloading. Large-document
+processing has automated contract coverage but has not yet been live-tested.
 
 See [component design](component-design.md),
 [verification procedures](../development/testing-strategy.md), and

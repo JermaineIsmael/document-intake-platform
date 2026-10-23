@@ -42,18 +42,23 @@ validate the deployed ingestion chain.
 The current resource group is `rg-ai200-doc-intake-dev`. SQL is explicitly
 configured in West US 3 with an overridden server name; other locations follow
 their configured defaults/overrides. Development settings include chat off,
-local Worker role grants off, and the Azure-services SQL firewall opt-in on.
+local Worker role grants off, and the prior deployed version's Azure-services
+SQL firewall opt-in.
 
-Do not infer a separate production deployment, private networking, disaster
-recovery environment, or approved service-level objective from this dev setup.
-The resource inventory is in the [deployment report](../development/deployment-verification.md).
+The repository now targets private SQL networking, but that Bicep change is not
+deployed; the existing Azure environment should not be assumed to have private
+SQL access. No separate production deployment, disaster-recovery environment,
+or approved service-level objective is established. The resource inventory is
+in the [deployment report](../development/deployment-verification.md).
 
 ## Scope
 
-Implemented scope is authenticated asynchronous intake, extraction, embedding,
-indexing, and metadata persistence. Human review workflows, document lifecycle
-APIs, tenant isolation, production operations, and complete question answering
-are not established.
+Implemented code scope includes authenticated asynchronous intake, extraction,
+embedding, indexing, metadata persistence, owner-scoped document lifecycle
+operations, claim-check messaging, and retention/deletion automation. The
+blocker changes remain undeployed and unverified in Azure. Human review
+workflows, production operations, backup/disaster recovery, and complete
+question answering are not established.
 
 See [architecture overview](architecture-overview.md) and
 [product requirements](../product/product-requirement.md).

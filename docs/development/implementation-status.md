@@ -1,52 +1,49 @@
 # Implementation status
 
-Baseline: 22 October 2026. "Implemented" describes repository code;
-"verified" requires evidence from a specific execution. This is not a live
-Azure drift report.
+Baseline: 22 October 2026. "Implemented in code" is distinct from "deployed"
+and "live verified." The current local validation is a Release solution build
+with warnings as errors, 137 passing automated tests, and successful Bicep
+template/parameter compilation. No Azure deployment or live verification of
+the blocker changes has occurred.
 
 | Capability | Implementation | Verification / remaining boundary |
 |---|---|---|
-| Authenticated upload | Implemented | Successful 202 and invalid-token 401 observed |
-| PDF/DOCX input validation | Implemented | Automated tests exist; full deployed negative matrix pending |
-| Private original storage | Implemented | Successful upload and downstream source evidence |
-| Event Grid extraction | Implemented | Deployed Function invocations observed |
-| Inline extracted-text messaging | Implemented | Small messages processed; large text exceeds batch/message limit |
-| Worker queue processing/scaling | Implemented | Queue activity, dead letters, and scale 0-to-1 observed |
-| Chunking/embeddings/Search upload | Implemented | Supported by later SQL success; direct Search check pending |
-| SQL metadata upsert | Implemented | One small-document row with ChunkCount 1 observed |
-| Message completion for successful upload | Implemented | Post-success settlement evidence pending |
-| Dead-letter recovery tooling/procedure | Manual Portal inspection available | Six historical failed messages; recovery not confirmed |
-| Chat model provisioning | Optional | Disabled due to quota |
-| `/ask` route | Implemented | Disabled-chat behavior tested; full live RAG not available |
-| RAG retrieval and answer generation | Placeholder/incomplete | Embedding extraction/retrieval return null; enabling model is insufficient |
-| Document status/read API | Not implemented | Upload Location points to unimplemented path |
-| Per-document ownership/tenant isolation | Not implemented | Must not claim multi-tenant security |
-| SQL restricted production networking | Not implemented | Broad Azure-services rule explicitly enabled for development |
-| SQL schema/user bootstrap | Manual SQL script | Pipeline does not execute database grants/migrations |
+| Authenticated upload and input validation | Implemented | Existing development upload evidence; current automated suite passes |
+| Owner-scoped document operations | Implemented in code | Entra `oid` is stored in Blob metadata, SQL, queue contract, and Search chunks. `GET`, `DELETE`, and `restore` check the caller's owner. Cross-owner live API tests pending |
+| Claim-check for extracted text | Implemented in code | Extractor writes text to private Blob Storage and queues a compact reference; Worker checks path plus document/owner metadata. Large-document live ingestion pending |
+| SQL private networking | Implemented in Bicep | SQL public access is disabled, with private endpoint/DNS and VNet-integrated Container Apps configuration. Not deployed; existing Container Apps environment migration and live DNS/connectivity checks remain |
+| 30-day recoverable deletion | Implemented in code/configuration | Owner restore path, SQL recovery deadline, Search deletion marker, and Blob soft delete configured. Live delete/restore test pending |
+| 90-day retention automation | Implemented in Worker | At 90-day expiry, hourly sweep hides Search chunks, soft-deletes blobs, then purges Search/SQL metadata; Blob soft-delete remains up to 30 days without application restore. Live expiry/retry test pending |
+| SQL schema and identity grants | Partial / manual | Idempotent migration and least-privilege contained-user grants are in `sql/schema.sql`; Entra SQL administrator must execute and verify them over private connectivity |
+| Small-document end-to-end ingestion | Complete for prior deployment | Seven accepted SQL rows each match one Search chunk; latest observed queue and dead-letter counts were zero |
+| RAG retrieval and answer generation | Incomplete | Question embedding extraction/retrieval remain placeholders; no owner-filtered retrieval or working answer generation |
+| Backup/disaster recovery | Not implemented | No cross-region recovery, Search backup, or exercised recovery objectives |
+| Operational alerting and release approval | Partial | Runbooks and telemetry exist; alert delivery, private networking, live retention, performance/cost, and production sign-off remain |
 
-## Confirmed ingestion milestone
+## Critical blocker changes
 
-Supplied SQL evidence: document `6debfb11-d680-48f6-ac64-3973276b8869`,
-ChunkCount `1`, IndexedAt `2026-10-22 12:58:58.6803004`.
-The code writes SQL only after embeddings and Search upload. This establishes
-a useful dev milestone, not load, vector-quality, or production certification.
+1. **Document ownership / authorization** — API resolves the Entra object ID,
+   records ownership, and restricts document lifecycle endpoints to the owner.
+   Search chunks are tagged with owner ID; RAG is still incomplete and must
+   apply owner filters when retrieval is implemented. Existing rows with no
+   owner remain inaccessible by design.
+2. **Production SQL/network isolation** — Bicep provisions private SQL access
+   and places Container Apps in the VNet. Address-space overlap review, app
+   environment migration/recreation, deployment, SQL DNS and connectivity
+   verification, and SQL contained-user setup remain operational tasks.
+3. **Large-document messaging** — Extracted text is persisted in private Blob
+   Storage; Service Bus carries a reference instead of inline document text.
+   Live large-document and retry testing remains.
+4. **Retention/deletion/recovery** — Owner-initiated deletion is recoverable
+   through the API for 30 days. At 90-day retention expiry the Worker purges
+   Search/SQL metadata after soft-deleting blobs; Blob Storage's own soft-delete
+   remains for up to 30 days, but the application restore window has expired.
+   This does not provide backup or disaster recovery, and must be live-tested.
 
-## Implemented deployment fixes
+## Previous ingestion milestone
 
-Flex Consumption replaces quota-blocked Y1 hosting. Docker agent builds avoid
-ACR Tasks restrictions. Worker image pulls use a preauthorized user-assigned
-identity. Function readiness polls ARM state and indexed functions. Compatible
-Functions telemetry dependencies remove the observed type-load failure.
-Worker application settings now match startup validation. Event Grid
-dead-letter writes use account-scoped Blob Data Contributor. SQL has an explicit
-development Azure-services firewall opt-in.
-
-Existing-server SQL authentication changes and accidental bootstrap of a
-populated environment remain operational risks.
-
-## Evidence and updates
-
-See [deployment verification](deployment-verification.md) for the detailed
-test history and resource inventory. Direct Search results, queue settlement,
-and historical dead-letter disposition must be recorded before closing the
-[MVP verification gate](../product/mvp-definition.md).
+Supplied SQL/Search evidence showed seven accepted documents with matching
+one-chunk rows. Two intentionally deleted historical queue messages are
+excluded from successful ingestion samples. See
+[deployment verification](deployment-verification.md) for detailed evidence
+and caveats.
