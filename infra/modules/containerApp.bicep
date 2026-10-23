@@ -35,6 +35,9 @@ param registryAuthenticationEnabled bool = true
 @description('Optional user-assigned identity resource ID for image pulls. Empty uses the system-assigned identity.')
 param registryIdentityResourceId string = ''
 
+@description('Additional user-assigned identity resource IDs, for example a dedicated Azure SQL identity.')
+param additionalUserAssignedIdentityIds string[] = []
+
 @minValue(0)
 param minReplicas int = 0
 
@@ -53,15 +56,17 @@ param secrets {
 
 param scaleRules scaleRule[] = []
 
+var userAssignedIdentityIds = union(
+  empty(registryIdentityResourceId) ? [] : [registryIdentityResourceId],
+  additionalUserAssignedIdentityIds
+)
 
 resource app 'Microsoft.App/containerApps@2025-01-01' = {
   name: name
   location: location
   identity: {
-    type: empty(registryIdentityResourceId) ? 'SystemAssigned' : 'SystemAssigned,UserAssigned'
-    userAssignedIdentities: empty(registryIdentityResourceId) ? null : {
-      '${registryIdentityResourceId}': {}
-    }
+    type: empty(userAssignedIdentityIds) ? 'SystemAssigned' : 'SystemAssigned,UserAssigned'
+    userAssignedIdentities: empty(userAssignedIdentityIds) ? null : toObject(userAssignedIdentityIds, id => id, id => {})
   }
   properties: {
     managedEnvironmentId: environmentId

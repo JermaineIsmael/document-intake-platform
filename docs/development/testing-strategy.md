@@ -11,7 +11,7 @@ business-flow checks; none substitutes for the others.
 | API integration | Upload, request limit, auth, ownership, delete/restore, and Ask endpoint tests | Live Entra consent/token acquisition and cross-owner checks are separate |
 | Extractor | Event validation, claim-check storage/message contract, failure propagation, telemetry initialization | Azure Function host indexing and large-document behavior must also be tested live |
 | Worker | TextChunker, IndexSchema, claim-check validation, ChunkIndexer, IngestionWorker, retention tests | Real quotas/network permissions are not mock behavior |
-| SQL | DocumentMetadataRepository LocalDB tests, including replay/concurrency | Windows LocalDB tests skip when unavailable; Ubuntu CI does not prove these executed |
+| SQL | DocumentMetadataRepository LocalDB tests applying the real `sql/migrations` scripts, including replay/concurrency, forward-only status transitions, stale timeouts, and CHECK constraints; migration runner checksum/ordering tests | Windows LocalDB tests skip when unavailable; Ubuntu CI does not prove these executed |
 | RAG | Service/endpoint tests for current behavior | Do not interpret placeholder/null behavior as successful retrieval |
 | Infrastructure | Bicep compilation and targeted compiled-ARM assertions | Compilation does not prove capacity, permission propagation, or runtime health |
 | Deployment | Pipeline build/tests, image publish, Function indexing gate | Provisioned/Healthy resource state can coexist with app failure |
@@ -62,7 +62,8 @@ private SQL DNS/connectivity, and live delete/restore/retention remain pending.
 ## Negative and recovery cases
 
 - Missing file, wrong content/extension, oversized upload, invalid token.
-- Empty extracted text and large claim-check processing limits.
+- `noText`, extraction-failure, and stale-timeout status transitions; large claim-check processing limits.
+- Migration job execution and SQL authentication convergence against an existing server.
 - Search/OpenAI throttling or permission failure; SQL firewall/login/schema failure.
 - Lock expiry, concurrent same-ID replay, partial Search-before-SQL completion.
 - Delete/restore within and beyond the recovery deadline; retention retries and

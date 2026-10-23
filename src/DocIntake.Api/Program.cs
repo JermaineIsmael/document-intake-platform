@@ -81,8 +81,16 @@ if (!string.IsNullOrWhiteSpace(metadataSqlServer) && !string.IsNullOrWhiteSpace(
         Encrypt = Microsoft.Data.SqlClient.SqlConnectionEncryptOption.Mandatory,
         TrustServerCertificate = false
     }.ConnectionString;
+    // A dedicated user-assigned identity (database user created by the migration job) authenticates to
+    // SQL when configured; local development falls back to the developer's DefaultAzureCredential.
+    var sqlIdentityClientId = builder.Configuration["Sql:ManagedIdentityClientId"];
+    Azure.Core.TokenCredential sqlCredential = string.IsNullOrWhiteSpace(sqlIdentityClientId)
+        ? new DefaultAzureCredential()
+        : Guid.TryParse(sqlIdentityClientId, out _)
+            ? new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(sqlIdentityClientId))
+            : throw new InvalidOperationException("Sql:ManagedIdentityClientId must be a GUID.");
     builder.Services.AddSingleton<IDocumentMetadataStore>(_ =>
-        new SqlDocumentMetadataStore(sqlConnectionString, new DefaultAzureCredential()));
+        new SqlDocumentMetadataStore(sqlConnectionString, sqlCredential));
 }
 else if (builder.Environment.IsDevelopment() && builder.Configuration.GetValue<bool>("Development:BypassAuth"))
 {

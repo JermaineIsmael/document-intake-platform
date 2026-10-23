@@ -29,8 +29,13 @@ duplicate this design or certify its implementation.
   identities rather than source-controlled service passwords.
 - Resource-management rights, service data-plane RBAC, and SQL database grants
   are separate. Subscription Contributor is not SQL login or message-read access.
-- SQL's intended template state is Entra-only authentication and a group admin.
-  Existing-server drift/transitions must be checked explicitly.
+- SQL is Entra-only with a group administrator. Each deployment logs the
+  current state and converges existing servers through the `administrators`
+  and `azureADOnlyAuthentications` child resources, then fails if the admin
+  SID or Entra-only setting does not match.
+- The API and Worker use dedicated SQL user-assigned identities mapped to
+  least-privilege `docintake_api`/`docintake_worker` database roles; only the
+  migration job identity is a member of the admin group.
 
 ## Identities and scope
 
@@ -60,9 +65,8 @@ access. The address ranges are parameters and must be checked for overlap.
 Existing Container Apps environments may require migration/recreation; do not
 assume incremental deployment can move an existing environment into the VNet.
 The intended private-network configuration has not been deployed or verified.
-SQL database users and grants still require administrator execution of the
-schema script from a network path that can resolve and reach the private
-endpoint.
+SQL database users and grants are applied by the migration Container Apps Job,
+which runs inside the VNet and reaches the private endpoint.
 
 ## Untrusted input and data exposure
 

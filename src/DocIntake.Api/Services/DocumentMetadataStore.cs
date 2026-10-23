@@ -1,6 +1,7 @@
 using System.Data;
 using System.Collections.Concurrent;
 using Azure.Core;
+using DocIntake.Shared;
 using Microsoft.Data.SqlClient;
 
 namespace DocIntake.Api.Services;
@@ -15,7 +16,10 @@ public sealed record DocumentMetadata(
     DateTimeOffset? IndexedAt,
     DateTimeOffset? DeletedAt,
     DateTimeOffset? RecoverableUntil,
-    DateTimeOffset? DeletionProcessedAt);
+    DateTimeOffset? DeletionProcessedAt,
+    DocumentStatus Status = DocumentStatus.Queued,
+    DateTimeOffset? StatusUpdatedAt = null,
+    string? FailureCode = null);
 
 public interface IDocumentMetadataStore
 {
@@ -33,12 +37,39 @@ public sealed class InMemoryDocumentMetadataStore : IDocumentMetadataStore
 
     public Task RegisterAsync(DocumentMetadata document, CancellationToken ct)
     {
-        if (!_documents.TryAdd(document.Id, document))
+        var registered = document with
+        {
+            Status = DocumentStatus.Queued,
+            StatusUpdatedAt = document.CreatedAt,
+            FailureCode = null
+        };
+        if (!_documents.TryAdd(document.Id, registered))
         {
             throw new InvalidOperationException("Document ID already exists.");
         }
 
         return Task.CompletedTask;
+    }
+
+    // Development/test hook standing in for the Worker, which owns status transitions in SQL.
+    public bool TrySetStatus(string id, DocumentStatus status, string? failureCode, DateTimeOffset at,
+        int? chunkCount = null)
+    {
+        if (!_documents.TryGetValue(id, out var document)
+            || !DocumentStatusTransitions.CanTransition(document.Status, status))
+        {
+            return false;
+        }
+
+        _documents[id] = document with
+        {
+            Status = status,
+            StatusUpdatedAt = at,
+            FailureCode = status == DocumentStatus.Failed ? failureCode : null,
+            ChunkCount = chunkCount ?? document.ChunkCount,
+            IndexedAt = status is DocumentStatus.Indexed or DocumentStatus.NoText ? at : document.IndexedAt
+        };
+        return true;
     }
 
     public Task<DocumentMetadata?> GetOwnedAsync(string id, string ownerId, CancellationToken ct)
@@ -127,8 +158,9 @@ public sealed class SqlDocumentMetadataStore(string connectionString, TokenCrede
 
         await using var connection = await OpenAsync(ct).ConfigureAwait(false);
         await using var command = new SqlCommand("""
-            INSERT dbo.Documents (Id, SourceUrl, BlobName, OwnerId, ChunkCount, CreatedAt, IndexedAt)
-            VALUES (@Id, @SourceUrl, @BlobName, @OwnerId, 0, @CreatedAt, NULL);
+            INSERT dbo.Documents (Id, SourceUrl, BlobName, OwnerId, ChunkCount, CreatedAt, IndexedAt,
+                                  Status, StatusUpdatedAt, FailureCode)
+            VALUES (@Id, @SourceUrl, @BlobName, @OwnerId, 0, @CreatedAt, NULL, N'Queued', @CreatedAt, NULL);
             """, connection);
         AddIdentity(command, document.Id, document.OwnerId);
         command.Parameters.Add("@SourceUrl", SqlDbType.NVarChar, 2048).Value = document.SourceUrl;
@@ -154,7 +186,7 @@ public sealed class SqlDocumentMetadataStore(string connectionString, TokenCrede
         await using var connection = await OpenAsync(ct).ConfigureAwait(false);
         await using var command = new SqlCommand("""
             SELECT Id, SourceUrl, BlobName, OwnerId, ChunkCount, CreatedAt, IndexedAt,
-                   DeletedAt, RecoverableUntil, DeletionProcessedAt
+                   DeletedAt, RecoverableUntil, DeletionProcessedAt, Status, StatusUpdatedAt, FailureCode
             FROM dbo.Documents
             WHERE Id = @Id AND OwnerId = @OwnerId;
             """, connection);
@@ -167,12 +199,21 @@ public sealed class SqlDocumentMetadataStore(string connectionString, TokenCrede
 
         return new DocumentMetadata(
             reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
-            reader.GetInt32(4), new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc)),
-            reader.IsDBNull(6) ? null : new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(6), DateTimeKind.Utc)),
-            reader.IsDBNull(7) ? null : new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)),
-            reader.IsDBNull(8) ? null : new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)),
-            reader.IsDBNull(9) ? null : new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc)));
+            reader.GetInt32(4), Utc(reader, 5)!.Value, Utc(reader, 6), Utc(reader, 7), Utc(reader, 8), Utc(reader, 9),
+            ParseStatus(reader.GetString(10)), Utc(reader, 11), reader.IsDBNull(12) ? null : reader.GetString(12));
     }
+
+    // An unknown persisted value is reported as Failed rather than guessed, so newer schema values
+    // never appear as progress to callers.
+    internal static DocumentStatus ParseStatus(string value) =>
+        Enum.TryParse<DocumentStatus>(value, ignoreCase: false, out var status) && Enum.IsDefined(status)
+            ? status
+            : DocumentStatus.Failed;
+
+    private static DateTimeOffset? Utc(SqlDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal)
+            ? null
+            : new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(ordinal), DateTimeKind.Utc));
 
     public async Task MarkDeletedAsync(
         string id, string ownerId, DateTimeOffset deletedAt, DateTimeOffset recoverableUntil, CancellationToken ct)

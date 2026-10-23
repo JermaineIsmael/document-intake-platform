@@ -26,6 +26,12 @@ param apiImage string = 'mcr.microsoft.com/dotnet/samples:aspnetapp'
 @description('For the Worker deployment, supply the fully qualified ACR image (e.g., acr.azurecr.io/docintake-worker:latest). If omitted, Worker is not deployed.')
 param workerImage string = ''
 
+@description('Fully qualified ACR image for the database migration job. Empty skips the job; the deployment pipeline always supplies it.')
+param migrationImage string = ''
+
+@description('True when the SQL server already exists. Its Entra administrator and Entra-only authentication are then enforced through child resources, because the inline administrators block only applies when the server is created. The pipeline detects this automatically.')
+param sqlServerExists bool = false
+
 @description('Keep true until the Function code is published and indexed; false creates the Event Grid subscription.')
 param bootstrapExtractor bool = true
 
@@ -137,6 +143,20 @@ resource extractedDocuments 'Microsoft.ServiceBus/namespaces/queues@2024-01-01' 
   }
 }
 
+// Lifecycle events (Extracting, Failed) from the Extractor, which cannot reach the private SQL server.
+// The VNet-integrated Worker applies them to SQL. Message IDs are document+status, so duplicates are dropped.
+resource documentStatusQueue 'Microsoft.ServiceBus/namespaces/queues@2024-01-01' = {
+  parent: serviceBus
+  name: 'document-status'
+  properties: {
+    maxDeliveryCount: 10
+    deadLetteringOnMessageExpiration: true
+    lockDuration: 'PT1M'
+    requiresDuplicateDetection: true
+    duplicateDetectionHistoryTimeWindow: 'PT10M'
+  }
+}
+
 resource documentIntelligence 'Microsoft.CognitiveServices/accounts@2026-09-01' = {
   name: documentIntelligenceName
   location: location
@@ -239,25 +259,51 @@ resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2026-0
 }
 
 // IMPORTANT: Entra-only authentication means this server has NO SQL admin login or password.
-// The deployer must have (or create) an Entra security group, pass its name and object ID, and be a
-// member of it to connect as admin and run sql/schema.sql.
+// The Entra security group (sqlAdminGroupName/sqlAdminGroupObjectId) is the only administrator. The
+// database migration job's identity must be a member of it (one-time prerequisite; see
+// docs/development/deployment-verification.md); the job then applies schema and application grants.
 // Incremental deployments retain old firewall rules; remove any legacy AllowAzureServices rule
 // separately. Public access stays disabled regardless of those retained rules.
+var sqlEntraAdministrator = {
+  administratorType: 'ActiveDirectory'
+  login: sqlAdminGroupName
+  sid: sqlAdminGroupObjectId
+  tenantId: tenant().tenantId
+}
+
+// The inline administrators block is honored only at creation, so it is omitted for an existing
+// server; the child resources below converge both new and existing servers to the same state.
 resource sqlServer 'Microsoft.Sql/servers@2025-01-01' = {
   name: sqlServerName
   location: sqlLocation
   properties: {
     minimalTlsVersion: '1.2'
     publicNetworkAccess: 'Disabled'
-    administrators: {
-      administratorType: 'ActiveDirectory'
+    administrators: sqlServerExists ? null : union(sqlEntraAdministrator, {
       azureADOnlyAuthentication: true
-      login: sqlAdminGroupName
-      sid: sqlAdminGroupObjectId
       principalType: 'Group'
-      tenantId: tenant().tenantId
-    }
+    })
   }
+}
+
+// Repairs administrator drift (for example a user or a different group set as admin in the portal).
+resource sqlAdministrator 'Microsoft.Sql/servers/administrators@2025-01-01' = {
+  parent: sqlServer
+  name: 'ActiveDirectory'
+  properties: sqlEntraAdministrator
+}
+
+// Re-enforces Entra-only authentication after the administrator is in place, so the server is never
+// left Entra-only without a valid Entra administrator.
+resource sqlEntraOnlyAuthentication 'Microsoft.Sql/servers/azureADOnlyAuthentications@2025-01-01' = {
+  parent: sqlServer
+  name: 'Default'
+  properties: {
+    azureADOnlyAuthentication: true
+  }
+  dependsOn: [
+    sqlAdministrator
+  ]
 }
 
 resource sqlDatabase 'Microsoft.Sql/servers/databases@2025-01-01' = {
@@ -393,6 +439,34 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   }
   properties: {
     adminUserEnabled: false
+  }
+}
+
+// Dedicated user-assigned identities for Azure SQL. Their client IDs are known at deployment time, so
+// the migration job can create the contained database users (SID = client ID) without Microsoft Graph.
+resource apiSqlIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${prefix}-api-sql'
+  location: location
+}
+
+resource workerSqlIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${prefix}-worker-sql'
+  location: location
+}
+
+// Must be a member of the SQL Entra admin group (sqlAdminGroupObjectId); the pipeline checks this.
+resource sqlMigratorIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${prefix}-sql-migrator'
+  location: location
+}
+
+resource sqlMigratorAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(registry.id, sqlMigratorIdentity.id, acrPullRoleId)
+  scope: registry
+  properties: {
+    roleDefinitionId: acrPullRoleId
+    principalId: sqlMigratorIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
   }
 }
 
@@ -579,6 +653,7 @@ resource extractorAppSettings 'Microsoft.Web/sites/config@2022-03-01' = {
     DocIntel__Endpoint: documentIntelligence.properties.endpoint
     ServiceBus__Namespace: '${serviceBus.name}.servicebus.windows.net'
     ServiceBus__QueueName: extractedDocuments.name
+    ServiceBus__StatusQueueName: documentStatusQueue.name
     APPLICATIONINSIGHTS_CONNECTION_STRING: insights.properties.ConnectionString
   }
 }
@@ -650,6 +725,9 @@ module api 'modules/containerApp.bicep' = {
     external: !bootstrap
     minReplicas: bootstrap ? 0 : 1
     maxReplicas: 3
+    additionalUserAssignedIdentityIds: [
+      apiSqlIdentity.id
+    ]
     envVars: [
       {
         name: 'ASPNETCORE_ENVIRONMENT'
@@ -698,6 +776,10 @@ module api 'modules/containerApp.bicep' = {
       {
         name: 'Sql__Database'
         value: sqlDatabase.name
+      }
+      {
+        name: 'Sql__ManagedIdentityClientId'
+        value: apiSqlIdentity.properties.clientId
       }
       {
         name: 'OpenAI__Endpoint'
@@ -845,7 +927,7 @@ resource eventGridDeadLetterRole 'Microsoft.Authorization/roleAssignments@2022-0
 // Search Service Contributor is needed because the worker creates/updates the index schema; with
 // disableLocalAuth on Search, its key-management actions grant no data access.
 // SQL access is not Azure RBAC: it comes from Entra admin-group membership (local) or the contained
-// database user created by sql/schema.sql (Sprint 4 managed identity).
+// database users the migration job creates for the API and Worker SQL identities.
 resource localWorkerSearchIndexDataContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableLocalWorkerAccess) {
   name: guid(search.id, workerPrincipalId, searchIndexDataContributorRoleId)
   scope: search
@@ -903,7 +985,9 @@ resource workerRegistryAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-
 }
 
 // Sprint 4: Deploy the Worker Container App for ingesting chunks from the extracted-documents queue.
-// Only deployed if workerImage is non-empty. Scales 0-5 replicas based on queue depth (KEDA).
+// Only deployed if workerImage is non-empty. Scales 0-5 replicas on KEDA rules: the ingestion queue,
+// the document-status queue, and an hourly cron window so retention and stale-processing sweeps still
+// run while both queues are idle.
 module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
   name: 'docintake-worker'
   params: {
@@ -917,6 +1001,9 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
     ingressEnabled: false
     minReplicas: 0
     maxReplicas: 5
+    additionalUserAssignedIdentityIds: [
+      workerSqlIdentity.id
+    ]
     envVars: [
       {
         name: 'Storage__BlobEndpoint'
@@ -933,6 +1020,10 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
       {
         name: 'ServiceBus__QueueName'
         value: extractedDocuments.name
+      }
+      {
+        name: 'ServiceBus__StatusQueueName'
+        value: documentStatusQueue.name
       }
       {
         name: 'OpenAI__Endpoint'
@@ -955,6 +1046,10 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
         value: sqlDatabase.name
       }
       {
+        name: 'Sql__ManagedIdentityClientId'
+        value: workerSqlIdentity.properties.clientId
+      }
+      {
         name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
         value: insights.properties.ConnectionString
       }
@@ -970,6 +1065,31 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
             queueName: extractedDocuments.name
             messageCount: '10'
             cloud: 'AzurePublicCloud'
+          }
+        }
+      }
+      {
+        name: 'status-queue-scale'
+        custom: {
+          type: 'azure-servicebus'
+          identity: 'system'
+          metadata: {
+            namespace: serviceBusNamespaceName
+            queueName: documentStatusQueue.name
+            messageCount: '50'
+            cloud: 'AzurePublicCloud'
+          }
+        }
+      }
+      {
+        name: 'hourly-maintenance'
+        custom: {
+          type: 'cron'
+          metadata: {
+            timezone: 'Etc/UTC'
+            start: '0 * * * *'
+            end: '10 * * * *'
+            desiredReplicas: '1'
           }
         }
       }
@@ -1059,9 +1179,87 @@ resource workerExtractedTextReader 'Microsoft.Authorization/roleAssignments@2022
   }
 }
 
-// SQL data-plane access is not granted by Azure RBAC. After deployment, use sql/schema.sql
-// from a VNet-connected host to create contained users for BOTH API and Worker system identities,
-// granting db_datareader/db_datawriter (or narrower table grants) for status/delete/restore and ingestion.
+// SQL data-plane access is not granted by Azure RBAC. The migration job below runs inside the VNet,
+// applies the versioned scripts in sql/migrations, and creates contained users for the API and Worker
+// SQL identities in the least-privilege docintake_api/docintake_worker roles. The pipeline starts the
+// job after this deployment and deploys new application images only after it succeeds.
+resource migrationJob 'Microsoft.App/jobs@2025-01-01' = if (!empty(migrationImage)) {
+  name: '${prefix}-db-migrate'
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${sqlMigratorIdentity.id}': {}
+    }
+  }
+  properties: {
+    environmentId: environment.id
+    workloadProfileName: 'Consumption'
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 1800
+      replicaRetryLimit: 0
+      manualTriggerConfig: {
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      registries: [
+        {
+          server: registry.properties.loginServer
+          identity: sqlMigratorIdentity.id
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'migrations'
+          image: migrationImage
+          resources: {
+            cpu: json('0.25')
+            memory: '0.5Gi'
+          }
+          env: [
+            {
+              name: 'Sql__Server'
+              value: sqlServer.properties.fullyQualifiedDomainName
+            }
+            {
+              name: 'Sql__Database'
+              value: sqlDatabase.name
+            }
+            {
+              name: 'Sql__ManagedIdentityClientId'
+              value: sqlMigratorIdentity.properties.clientId
+            }
+            {
+              name: 'Migrations__ApiPrincipalName'
+              value: apiSqlIdentity.name
+            }
+            {
+              name: 'Migrations__ApiClientId'
+              value: apiSqlIdentity.properties.clientId
+            }
+            {
+              name: 'Migrations__WorkerPrincipalName'
+              value: workerSqlIdentity.name
+            }
+            {
+              name: 'Migrations__WorkerClientId'
+              value: workerSqlIdentity.properties.clientId
+            }
+          ]
+        }
+      ]
+    }
+  }
+  dependsOn: [
+    sqlMigratorAcrPull
+    sqlPrivateDnsLink
+    sqlPrivateDnsZoneGroup
+    sqlEntraOnlyAuthentication
+  ]
+}
 
 // Sprint 5: Resource group budget with email notifications at 80% and 100% thresholds.
 // Note: Budget alerts require that budgetNotificationEmail is non-empty. Email recipients must accept
@@ -1122,3 +1320,7 @@ output sqlServerFqdn string = sqlServer.properties.fullyQualifiedDomainName
 output sqlDatabaseName string = sqlDatabase.name
 output apiPrincipalId string = api.outputs.principalId
 output workerPrincipalId string = !empty(workerImage) ? worker!.outputs.principalId : ''
+output sqlServerName string = sqlServer.name
+output sqlAdminGroupObjectId string = sqlAdminGroupObjectId
+output migrationJobName string = !empty(migrationImage) ? migrationJob.name : ''
+output sqlMigratorPrincipalId string = sqlMigratorIdentity.properties.principalId

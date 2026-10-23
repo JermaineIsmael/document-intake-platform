@@ -9,6 +9,7 @@
     "Storage__ExtractedTextContainer": "extracted-text",
     "DocIntel__Endpoint": "https://<document-intelligence-resource>.cognitiveservices.azure.com/",
     "ServiceBus__Namespace": "<service-bus-namespace>.servicebus.windows.net",
-    "ServiceBus__QueueName": "extracted-documents"
+    "ServiceBus__QueueName": "extracted-documents",
+    "ServiceBus__StatusQueueName": "document-status"
   }
 }

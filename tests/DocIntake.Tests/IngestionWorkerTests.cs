@@ -14,6 +14,7 @@ public sealed class IngestionWorkerTests : IAsyncDisposable
     private readonly ServiceBusClient _serviceBus = new("fake.servicebus.windows.net", new FakeTokenCredential());
     private readonly RecordingIndexer _indexer = new();
     private readonly RecordingReceiver _receiver = new();
+    private readonly FakeMetadataRepository _metadata = new();
     private readonly IngestionWorker _worker;
 
     public IngestionWorkerTests()
@@ -22,6 +23,7 @@ public sealed class IngestionWorkerTests : IAsyncDisposable
             _serviceBus,
             new SearchIndexClient(new Uri("https://fake-search.search.windows.net"), new FakeTokenCredential()),
             _indexer,
+            _metadata,
             Options.Create(new IngestionWorkerOptions()),
             NullLogger<IngestionWorker>.Instance);
     }
@@ -59,6 +61,44 @@ public sealed class IngestionWorkerTests : IAsyncDisposable
         _receiver.Actions.Should().Equal("dead-letter");
         _receiver.DeadLetterReason.Should().Be("IndexingFailed");
         _receiver.DeadLetterDescription.Should().Contain("search unavailable");
+        _metadata.StatusUpdates.Should().ContainSingle().Which.Should().Be(
+            (_indexer.Received[0].DocumentId.ToString("D"), DocumentStatus.Failed, DocumentFailureCodes.IndexingFailed));
+    }
+
+    [Fact]
+    public async Task Failure_before_max_delivery_count_does_not_mark_failed()
+    {
+        _indexer.Failure = new InvalidOperationException("search unavailable");
+
+        await _worker.HandleMessageAsync(Args(ExtractorBody(ValidDocument()), deliveryCount: 2));
+
+        _metadata.StatusUpdates.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Status_write_failure_still_dead_letters_the_message()
+    {
+        _indexer.Failure = new InvalidOperationException("search unavailable");
+        _metadata.StatusUpdateException = new InvalidOperationException("sql unavailable");
+
+        await _worker.HandleMessageAsync(Args(ExtractorBody(ValidDocument()), deliveryCount: 5));
+
+        _receiver.Actions.Should().Equal("dead-letter");
+    }
+
+    [Fact]
+    public async Task Invalid_message_with_identifiable_owner_marks_the_document_failed()
+    {
+        var documentId = Guid.NewGuid();
+        var ownerId = Guid.NewGuid().ToString("D");
+        var body = BinaryData.FromString(
+            $$"""{"sourceUrl":"ftp://host/a.pdf","documentId":"{{documentId:D}}","ownerId":"{{ownerId}}","content":"x"}""");
+
+        await _worker.HandleMessageAsync(Args(body, deliveryCount: 1));
+
+        _receiver.DeadLetterReason.Should().Be("InvalidDocumentMessage");
+        _metadata.StatusUpdates.Should().ContainSingle().Which.Should().Be(
+            (documentId.ToString("D"), DocumentStatus.Failed, DocumentFailureCodes.InvalidMessage));
     }
 
     [Theory]
@@ -72,6 +112,7 @@ public sealed class IngestionWorkerTests : IAsyncDisposable
         _indexer.Received.Should().BeEmpty();
         _receiver.Actions.Should().Equal("dead-letter");
         _receiver.DeadLetterReason.Should().Be("InvalidDocumentMessage");
+        _metadata.StatusUpdates.Should().BeEmpty("no trustworthy document and owner identity is available");
     }
 
     [Fact]

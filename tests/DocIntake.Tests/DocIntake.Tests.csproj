@@ -27,6 +27,7 @@
     <ProjectReference Include="..\..\src\DocIntake.Api\DocIntake.Api.csproj" />
     <ProjectReference Include="..\..\src\DocIntake.Shared\DocIntake.Shared.csproj" />
     <ProjectReference Include="..\..\src\DocIntake.Worker\DocIntake.Worker.csproj" />
+    <ProjectReference Include="..\..\src\DocIntake.Migrations\DocIntake.Migrations.csproj" />
   </ItemGroup>
 
 </Project>

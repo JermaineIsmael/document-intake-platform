@@ -54,6 +54,10 @@ public sealed class ChunkIndexer(
             return;
         }
 
+        // Rank-guarded: a redelivery after the document reached a terminal status leaves it unchanged.
+        await metadata.TryUpdateStatusAsync(documentId, message.OwnerId, DocumentStatus.Processing, null, ct)
+            .ConfigureAwait(false);
+
         var content = message.Content;
         if (content is null)
         {
@@ -70,7 +74,10 @@ public sealed class ChunkIndexer(
         var chunks = TextChunker.Split(content);
         if (chunks.Count == 0)
         {
-            logger.LogWarning("Document {DocumentId} has no extractable text; nothing to index", documentId);
+            // Persist an explicit NoText result so callers can distinguish it from a processing failure.
+            await metadata.SaveAsync(documentId, message.SourceUrl, message.SourceBlobName,
+                message.OwnerId, message.CreatedAt, 0, ct).ConfigureAwait(false);
+            logger.LogWarning("Document {DocumentId} has no extractable text; marked NoText", documentId);
             return;
         }
 

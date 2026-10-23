@@ -65,7 +65,13 @@ internal static class Program
             new BlobServiceClient(storageEndpoint, credential)
                 .GetBlobContainerClient(configuration["Storage:ContainerName"] ?? "documents")));
         builder.Services.AddSingleton<IExtractedTextReader, BlobExtractedTextReader>();
-        builder.Services.AddSingleton<IDocumentMetadataRepository>(_ => new DocumentMetadataRepository(sqlConnectionString, credential));
+        var sqlIdentityClientId = configuration["Sql:ManagedIdentityClientId"];
+        TokenCredential sqlCredential = string.IsNullOrWhiteSpace(sqlIdentityClientId)
+            ? credential
+            : Guid.TryParse(sqlIdentityClientId, out _)
+                ? new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(sqlIdentityClientId))
+                : throw new InvalidOperationException("Sql__ManagedIdentityClientId must be a GUID.");
+        builder.Services.AddSingleton<IDocumentMetadataRepository>(_ => new DocumentMetadataRepository(sqlConnectionString, sqlCredential));
         builder.Services.AddOptions<ChunkIndexerOptions>()
             .Bind(configuration.GetSection(ChunkIndexerOptions.SectionName))
             .Validate(options => options.IsValid(), "Indexing batch sizes must be within the service limits.")
@@ -77,7 +83,7 @@ internal static class Program
             .ValidateOnStart();
         builder.Services.AddOptions<RetentionOptions>()
             .Bind(configuration.GetSection("Retention"))
-            .Validate(options => options.IsValid(), "Retention requires positive day counts, a batch size 1-1000, and sweep interval >= 1 minute.")
+            .Validate(options => options.IsValid(), "Retention requires positive day counts, a batch size 1-1000, sweep interval >= 1 minute, and a stale timeout >= 1 hour.")
             .ValidateOnStart();
         builder.Services.AddSingleton<IDocumentRetentionOperations>(services =>
             new BlobSearchRetentionOperations(
@@ -85,6 +91,11 @@ internal static class Program
                 services.GetRequiredService<OriginalDocumentsContainer>().Client,
                 services.GetRequiredService<BlobContainerClient>()));
         builder.Services.AddHostedService<IngestionWorker>();
+        builder.Services.AddOptions<StatusEventWorkerOptions>()
+            .Bind(configuration.GetSection(StatusEventWorkerOptions.SectionName))
+            .Validate(options => options.IsValid(), "ServiceBus status queue settings are invalid.")
+            .ValidateOnStart();
+        builder.Services.AddHostedService<StatusEventWorker>();
         builder.Services.AddHostedService<DocumentRetentionWorker>();
 
         // Same rule as Sprints 1 and 2: export only when APPLICATIONINSIGHTS_CONNECTION_STRING is set.

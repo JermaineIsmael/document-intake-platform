@@ -11,7 +11,7 @@ authorization, upload limits, Azure clients, telemetry, and routes.
 | Surface | Implemented behavior |
 |---|---|
 | `POST /documents` | Authenticated multipart upload, one `file`, PDF/DOCX validation, GUID assignment, owner metadata, private blob upload, HTTP 202 |
-| `GET /documents/{id}` | Owner-scoped lifecycle status (`queued`, `indexed`, `deleted`) |
+| `GET /documents/{id}` | Owner-scoped lifecycle status (`queued`, `extracting`, `processing`, `indexed`, `noText`, `failed`, `deleted`) with caller-safe failure details |
 | `DELETE /documents/{id}` | Owner-scoped soft delete with a 30-day recovery deadline |
 | `POST /documents/{id}/restore` | Owner-scoped restore during the recovery window |
 | `GET /` | Authenticated service identification |
@@ -51,7 +51,11 @@ completes, abandons, or dead-letters each message.
 [ChunkIndexer](../../src/DocIntake.Worker/ChunkIndexer.cs) checks that the
 document is active for the message owner, resolves the extracted-text reference,
 splits text, generates embeddings, uploads owner-tagged Search documents, then
-saves SQL metadata. Empty text produces a warning and no indexed metadata.
+saves SQL metadata. It marks the document `processing` first; empty text is
+saved with the terminal `noText` status and zero chunks.
+[StatusEventWorker](../../src/DocIntake.Worker/StatusEventWorker.cs) applies
+Extractor `extracting`/`failed` events from the `document-status` queue, and
+the retention sweep fails documents stuck in flight beyond the stale timeout.
 
 [DocumentMetadataRepository](../../src/DocIntake.Worker/DocumentMetadataRepository.cs)
 uses parameterized SQL, a transactional update/insert with locking, and a
@@ -93,11 +97,12 @@ backups or disaster recovery.
 [Container App module](../../infra/modules/containerApp.bicep) shares identity,
 registry, resources, scaling, and optional ingress/probes. The
 [pipeline](../../infra/azure-pipelines.yml) builds/tests, deploys images,
-publishes Extractor, verifies indexing, then enables Event Grid.
-SQL schema/user grants and Entra registration/consent remain external steps.
+runs the [database migration job](../../src/DocIntake.Migrations) before
+updating application images, publishes Extractor, verifies indexing, then
+enables Event Grid. Entra registration/consent and the one-time migrator
+admin-group membership remain external steps.
 Bicep configures VNet integration for Container Apps plus SQL private endpoint
 and private DNS, but the changes are not deployed. Existing environments may
-need migration/recreation; review CIDR overlap and run SQL grants from a private
-network path after deployment.
+need migration/recreation; review CIDR overlap before deployment.
 
 See [data flow](data-flow.md) and [implementation status](../development/implementation-status.md).

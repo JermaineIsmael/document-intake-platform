@@ -67,12 +67,29 @@ public sealed class ChunkIndexerTests : IDisposable
     [Theory]
     [InlineData("")]
     [InlineData("   \r\n\t ")]
-    public async Task Document_without_content_calls_no_azure_service(string content)
+    public async Task Document_without_content_calls_no_azure_service_and_records_no_text(string content)
     {
-        await _indexer.IndexAsync(new DocumentMessage(SourceUrl, Guid.NewGuid(), content), CancellationToken.None);
+        var message = new DocumentMessage(SourceUrl, Guid.NewGuid(), content);
+
+        await _indexer.IndexAsync(message, CancellationToken.None);
 
         _services.TotalRequests.Should().Be(0);
-        _metadata.SaveCalls.Should().Be(0);
+        _metadata.SaveCalls.Should().Be(1, "an explicit NoText result is persisted with zero chunks");
+        _metadata.Rows[message.DocumentId.ToString("D")].ChunkCount.Should().Be(0);
+        _metadata.StatusUpdates.Should().ContainSingle()
+            .Which.Status.Should().Be(DocumentStatus.Processing);
+    }
+
+    [Fact]
+    public async Task Indexing_marks_the_document_processing_before_any_azure_call()
+    {
+        var message = new DocumentMessage(SourceUrl, Guid.NewGuid(), SyntheticText(1000));
+
+        await _indexer.IndexAsync(message, CancellationToken.None);
+
+        _metadata.StatusUpdates.Should().ContainSingle().Which.Should()
+            .Be((message.DocumentId.ToString("D"), DocumentStatus.Processing, (string?)null));
+        _metadata.Rows[message.DocumentId.ToString("D")].ChunkCount.Should().BeGreaterThan(0);
     }
 
     [Fact]
@@ -226,6 +243,29 @@ internal sealed class FakeMetadataRepository : IDocumentMetadataRepository
 
     public Task MarkExpiredAsync(DateTimeOffset now, int retentionDays, int batchSize, CancellationToken ct) =>
         Task.CompletedTask;
+
+    public List<(string DocumentId, DocumentStatus Status, string? FailureCode)> StatusUpdates { get; } = [];
+
+    public Exception? StatusUpdateException { get; set; }
+
+    public Task<bool> TryUpdateStatusAsync(string documentId, string ownerId, DocumentStatus status,
+        string? failureCode, CancellationToken ct)
+    {
+        if (StatusUpdateException is not null)
+        {
+            throw StatusUpdateException;
+        }
+
+        lock (_gate)
+        {
+            StatusUpdates.Add((documentId, status, failureCode));
+        }
+
+        return Task.FromResult(true);
+    }
+
+    public Task<int> FailStaleAsync(DateTimeOffset now, TimeSpan timeout, int batchSize, CancellationToken ct) =>
+        Task.FromResult(0);
 
     public Task<IReadOnlyList<RetentionDocument>> GetPendingCleanupAsync(int batchSize, CancellationToken ct) =>
         Task.FromResult<IReadOnlyList<RetentionDocument>>([]);

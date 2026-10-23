@@ -48,7 +48,8 @@ sequenceDiagram
 | Queue body | JSON source, document ID, owner ID, creation time, original blob name, and extracted-text reference |
 | Queue identity | MessageId equals document GUID |
 | Search key | `<guid>-<zero-based-chunk-index>` with owner ID and deletion marker |
-| SQL key | Original GUID as `Id`, with owner and lifecycle timestamps |
+| SQL key | Original GUID as `Id`, with owner, lifecycle status/failure code, and timestamps |
+| Status event | `document-status` queue: document ID, owner ID, `Extracting` or `Failed` plus failure code; MessageId `<guid>:<status>` |
 
 Chunking uses 800 characters with 100-character overlap. Embeddings use
 1536 dimensions. The Search `source` field is filterable and stores the original
@@ -66,8 +67,10 @@ database reads and writes to that owner.
 - Search upserts deterministic IDs; SQL upserts the document key. Same-document
   replay is designed to converge without duplicate rows/chunk IDs.
 - SQL failure after Search upload leaves partial cross-store completion.
-- Empty-text processing is skipped, so absence of an indexed SQL row can
-  indicate no text, not necessarily a queue failure.
+- Empty text is recorded explicitly as `noText`; failures are recorded as
+  `failed` with a stable code. Status transitions only move forward, so
+  late or duplicate status events cannot regress a document, and documents
+  stuck in flight beyond the stale timeout become `ProcessingTimedOut`.
 - Owner deletion hides Search chunks, soft-deletes both blobs, and sets a
   30-day recovery deadline. The owner may restore within that window.
 - The Worker runs a configurable hourly sweep; at 90-day expiry it soft-deletes

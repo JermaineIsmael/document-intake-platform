@@ -29,16 +29,17 @@ truncation or Service Bus message-size failure.
 
 ## C. Verify lifecycle and deployment safety
 
-Owner-scoped queued/indexed/deleted status, delete/restore, and retention are
-implemented in code; detail states and live evidence remain.
+Owner-scoped lifecycle status (queued through indexed/noText/failed),
+delete/restore, retention, automated SQL migrations, and SQL authentication
+drift handling are implemented in code; live evidence remains.
 
-- Add processing/failed lifecycle states and user-visible extraction failures.
+- Live-test status transitions, `noText`, extraction failures, and timeouts.
 - Live-test cross-owner denial, 30-day restore boundaries, and 90-day cleanup.
-- Define no-text behavior.
-- Support new/existing SQL authentication paths without admin lockout.
+- Run the migration job and SQL authentication convergence against the
+  existing server after adding the migrator identity to the admin group.
 - Protect populated environments from accidental sample-image bootstrap.
 - Deploy private SQL networking after CIDR review and any required Container
-  Apps environment migration; run SQL grants over private connectivity.
+  Apps environment migration.
 
 Exit: users/operators can distinguish queued, failed, skipped, and completed
 work; repeated deployment does not undermine the running service.

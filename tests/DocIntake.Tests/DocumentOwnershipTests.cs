@@ -16,7 +16,8 @@ public sealed class DocumentOwnershipTests
             ownerId, 1, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, null, null);
         await store.RegisterAsync(document, CancellationToken.None);
 
-        (await store.GetOwnedAsync(documentId, ownerId, CancellationToken.None)).Should().Be(document);
+        (await store.GetOwnedAsync(documentId, ownerId, CancellationToken.None))
+            .Should().Be(document with { StatusUpdatedAt = document.CreatedAt });
         (await store.GetOwnedAsync(documentId, Guid.NewGuid().ToString("D"), CancellationToken.None))
             .Should().BeNull();
     }
