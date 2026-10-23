@@ -34,8 +34,14 @@ public sealed class DocumentMetadataRepositoryTests : IAsyncLifetime
             (
                 Id         nvarchar(64)   NOT NULL CONSTRAINT PK_Documents PRIMARY KEY,
                 SourceUrl  nvarchar(2048) NOT NULL,
+                BlobName   nvarchar(2048) NOT NULL,
+                OwnerId    nvarchar(128)  NOT NULL,
                 ChunkCount int            NOT NULL,
-                IndexedAt  datetime2      NOT NULL
+                CreatedAt  datetime2      NOT NULL,
+                IndexedAt  datetime2      NULL,
+                DeletedAt datetime2 NULL,
+                RecoverableUntil datetime2 NULL,
+                DeletionProcessedAt datetime2 NULL
             );
             """);
     }
@@ -58,14 +64,19 @@ public sealed class DocumentMetadataRepositoryTests : IAsyncLifetime
         var repository = new DocumentMetadataRepository(ConnectionString(_database), credential: null, time);
         var id = Guid.NewGuid().ToString("D");
 
-        await repository.SaveAsync(id, "https://st/documents/a.pdf", 3, CancellationToken.None);
+        var ownerId = "00000000-0000-0000-0000-000000000001";
+        var sourceBlobName = $"{id}/a.pdf";
+        await repository.SaveAsync(id, "https://st/documents/a.pdf", sourceBlobName,
+            ownerId, DateTimeOffset.UnixEpoch, 3, CancellationToken.None);
         time.Now = time.Now.AddMinutes(5);
-        var redelivery = () => repository.SaveAsync(id, "https://st/documents/a.pdf", 7, CancellationToken.None);
+        var redelivery = () => repository.SaveAsync(id, "https://st/documents/a.pdf", sourceBlobName,
+            ownerId, DateTimeOffset.UnixEpoch, 7, CancellationToken.None);
 
         await redelivery.Should().NotThrowAsync();
         var rows = await ReadRowsAsync();
         rows.Should().ContainSingle();
-        rows[0].Should().Be((id, "https://st/documents/a.pdf", 7, new DateTime(2026, 1, 1, 0, 5, 0)));
+        rows[0].Should().Be((id, "https://st/documents/a.pdf", sourceBlobName, ownerId, 7,
+            new DateTime(1970, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 5, 0)));
     }
 
     [LocalDbFact]
@@ -75,7 +86,8 @@ public sealed class DocumentMetadataRepositoryTests : IAsyncLifetime
         var id = Guid.NewGuid().ToString("D");
 
         var saves = Enumerable.Range(1, 8)
-            .Select(n => Task.Run(() => repository.SaveAsync(id, "https://st/documents/a.pdf", n, CancellationToken.None)));
+            .Select(n => Task.Run(() => repository.SaveAsync(id, "https://st/documents/a.pdf", $"{id}/a.pdf",
+                "00000000-0000-0000-0000-000000000001", DateTimeOffset.UnixEpoch, n, CancellationToken.None)));
         var act = () => Task.WhenAll(saves);
 
         await act.Should().NotThrowAsync();
@@ -87,24 +99,29 @@ public sealed class DocumentMetadataRepositoryTests : IAsyncLifetime
     {
         var repository = new DocumentMetadataRepository(ConnectionString(_database), credential: null);
 
-        var longId = () => repository.SaveAsync(new string('a', 65), "https://st/a", 1, CancellationToken.None);
-        var longUrl = () => repository.SaveAsync("id", "https://st/" + new string('a', 2048), 1, CancellationToken.None);
+        var longId = () => repository.SaveAsync(new string('a', 65), "https://st/a", "id/a.pdf",
+            "00000000-0000-0000-0000-000000000001", DateTimeOffset.UtcNow, 1, CancellationToken.None);
+        var longUrl = () => repository.SaveAsync("id", "https://st/" + new string('a', 2048), "id/a.pdf",
+            "00000000-0000-0000-0000-000000000001", DateTimeOffset.UtcNow, 1, CancellationToken.None);
 
         await longId.Should().ThrowAsync<ArgumentException>();
         await longUrl.Should().ThrowAsync<ArgumentException>();
         (await ReadRowsAsync()).Should().BeEmpty();
     }
 
-    private async Task<List<(string Id, string SourceUrl, int ChunkCount, DateTime IndexedAt)>> ReadRowsAsync()
+    private async Task<List<(string Id, string SourceUrl, string BlobName, string OwnerId, int ChunkCount,
+        DateTime CreatedAt, DateTime IndexedAt)>> ReadRowsAsync()
     {
         await using var connection = new SqlConnection(ConnectionString(_database));
         await connection.OpenAsync();
-        await using var command = new SqlCommand("SELECT Id, SourceUrl, ChunkCount, IndexedAt FROM dbo.Documents", connection);
+        await using var command = new SqlCommand(
+            "SELECT Id, SourceUrl, BlobName, OwnerId, ChunkCount, CreatedAt, IndexedAt FROM dbo.Documents", connection);
         await using var reader = await command.ExecuteReaderAsync();
-        var rows = new List<(string, string, int, DateTime)>();
+        var rows = new List<(string, string, string, string, int, DateTime, DateTime)>();
         while (await reader.ReadAsync())
         {
-            rows.Add((reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetDateTime(3)));
+            rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
+                reader.GetInt32(4), reader.GetDateTime(5), reader.GetDateTime(6)));
         }
 
         return rows;

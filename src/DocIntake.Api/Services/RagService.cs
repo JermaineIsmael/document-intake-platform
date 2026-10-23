@@ -9,7 +9,7 @@ public record AskResponse(string Answer, IReadOnlyList<string> Sources);
 
 public interface IRagService
 {
-    Task<AskResponse?> AskAsync(string question, CancellationToken ct);
+    Task<AskResponse?> AskAsync(string question, string ownerId, CancellationToken ct);
 }
 
 /// <summary>
@@ -18,7 +18,7 @@ public interface IRagService
 /// </summary>
 public sealed class NullRagService : IRagService
 {
-    public Task<AskResponse?> AskAsync(string question, CancellationToken ct)
+    public Task<AskResponse?> AskAsync(string question, string ownerId, CancellationToken ct)
     {
         return Task.FromResult<AskResponse?>(null);
     }
@@ -62,9 +62,10 @@ public sealed class RagService(
         Do not use knowledge outside the provided context.
         """;
 
-    public async Task<AskResponse?> AskAsync(string question, CancellationToken ct)
+    public async Task<AskResponse?> AskAsync(string question, string ownerId, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(question);
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
         logger.LogInformation("Question received (length {QuestionLength})", question.Length);
 
         try

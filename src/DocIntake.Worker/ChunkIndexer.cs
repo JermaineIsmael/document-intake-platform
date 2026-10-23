@@ -11,6 +11,11 @@ public interface IChunkIndexer
     Task IndexAsync(DocumentMessage message, CancellationToken ct);
 }
 
+public interface IExtractedTextReader
+{
+    Task<string> ReadAsync(string blobName, Guid documentId, string ownerId, CancellationToken ct);
+}
+
 public sealed class ChunkIndexerOptions
 {
     public const string SectionName = "Indexing";
@@ -31,6 +36,7 @@ public sealed class ChunkIndexer(
     EmbeddingClient embeddings,
     SearchClient search,
     IDocumentMetadataRepository metadata,
+    IExtractedTextReader extractedTextReader,
     IOptions<ChunkIndexerOptions> options,
     ILogger<ChunkIndexer> logger) : IChunkIndexer
 {
@@ -42,7 +48,26 @@ public sealed class ChunkIndexer(
         ArgumentNullException.ThrowIfNull(message);
         var documentId = message.DocumentId.ToString("D");
 
-        var chunks = TextChunker.Split(message.Content);
+        if (!await metadata.IsActiveAsync(documentId, message.OwnerId, ct).ConfigureAwait(false))
+        {
+            logger.LogInformation("Skipping deleted or unregistered document {DocumentId}", documentId);
+            return;
+        }
+
+        var content = message.Content;
+        if (content is null)
+        {
+            if (string.IsNullOrWhiteSpace(message.ExtractedTextBlobName))
+            {
+                throw new InvalidOperationException("Document message has no content or extracted-text reference.");
+            }
+
+            content = await extractedTextReader.ReadAsync(
+                    message.ExtractedTextBlobName, message.DocumentId, message.OwnerId, ct)
+                .ConfigureAwait(false);
+        }
+
+        var chunks = TextChunker.Split(content);
         if (chunks.Count == 0)
         {
             logger.LogWarning("Document {DocumentId} has no extractable text; nothing to index", documentId);
@@ -57,6 +82,9 @@ public sealed class ChunkIndexer(
             documents.Add(new SearchDocument
             {
                 ["id"] = $"{documentId}-{i}",
+                ["documentId"] = documentId,
+                ["ownerId"] = message.OwnerId,
+                ["isDeleted"] = false,
                 ["source"] = message.SourceUrl,
                 ["content"] = chunks[i],
                 ["contentVector"] = vectors[i]
@@ -73,7 +101,8 @@ public sealed class ChunkIndexer(
             await search.UploadDocumentsAsync(batch, indexOptions, ct).ConfigureAwait(false);
         }
 
-        await metadata.SaveAsync(documentId, message.SourceUrl, chunks.Count, ct).ConfigureAwait(false);
+        await metadata.SaveAsync(documentId, message.SourceUrl, message.SourceBlobName,
+            message.OwnerId, message.CreatedAt, chunks.Count, ct).ConfigureAwait(false);
 
         logger.LogInformation("Indexed {DocumentId} with {ChunkCount} chunks", documentId, chunks.Count);
     }

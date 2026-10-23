@@ -11,14 +11,21 @@ public static class AskEndpoints
 
     private static async Task<IResult> AskAsync(
         AskRequest request,
+        HttpContext context,
         IRagService rag,
         IConfiguration configuration,
+        IHostEnvironment environment,
         ILogger<Program> logger,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.Question))
         {
             return Results.BadRequest(new { error = "Question cannot be empty." });
+        }
+
+        if (!DocumentOwner.TryGet(context.User, environment, configuration, out var ownerId))
+        {
+            return Results.Forbid();
         }
 
         if (!configuration.GetValue("OpenAI:ChatEnabled", true))
@@ -33,7 +40,7 @@ public static class AskEndpoints
 
         try
         {
-            var response = await rag.AskAsync(request.Question, cancellationToken).ConfigureAwait(false);
+            var response = await rag.AskAsync(request.Question, ownerId, cancellationToken).ConfigureAwait(false);
             if (response is null)
             {
                 logger.LogInformation("No relevant content found to answer the question");
