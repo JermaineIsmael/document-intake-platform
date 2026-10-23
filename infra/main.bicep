@@ -59,8 +59,14 @@ param sqlLocation string = location
 @description('Optional globally unique SQL server name. Empty preserves the generated name.')
 param sqlServerNameOverride string = ''
 
-@description('Allow connections to SQL from Azure services, including resources outside this subscription. Development opt-in only; authentication and database permissions are still required.')
-param allowAzureServicesToSql bool = false
+@description('Address space for the application VNet. Must not overlap connected networks; plan before deployment because an existing Container Apps environment cannot change its infrastructure subnet.')
+param virtualNetworkAddressPrefix string = '10.40.0.0/16'
+
+@description('Dedicated Container Apps infrastructure subnet, delegated to Microsoft.App/environments. Must fit inside the VNet and not overlap the private endpoint subnet; /23 leaves room for scaling.')
+param containerAppsSubnetAddressPrefix string = '10.40.0.0/23'
+
+@description('Separate, non-delegated subnet for private endpoints. Must fit inside the VNet and not overlap the Container Apps subnet.')
+param privateEndpointSubnetAddressPrefix string = '10.40.2.0/27'
 
 @description('Grant development identities Worker roles. Not required for the deployed Worker managed identity.')
 param enableLocalWorkerAccess bool = true
@@ -92,6 +98,7 @@ var embeddingDeploymentName = 'text-embedding-3-small'
 var sqlServerName = empty(sqlServerNameOverride) ? '${prefix}-sql' : sqlServerNameOverride
 var sqlDatabaseName = 'docintake'
 var blobContributorRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
+var blobReaderRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1')
 var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 var telemetryPublisherRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')
 var storageBlobDataOwnerRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
@@ -234,12 +241,14 @@ resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2026-0
 // IMPORTANT: Entra-only authentication means this server has NO SQL admin login or password.
 // The deployer must have (or create) an Entra security group, pass its name and object ID, and be a
 // member of it to connect as admin and run sql/schema.sql.
+// Incremental deployments retain old firewall rules; remove any legacy AllowAzureServices rule
+// separately. Public access stays disabled regardless of those retained rules.
 resource sqlServer 'Microsoft.Sql/servers@2025-01-01' = {
   name: sqlServerName
   location: sqlLocation
   properties: {
     minimalTlsVersion: '1.2'
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: 'Disabled'
     administrators: {
       administratorType: 'ActiveDirectory'
       azureADOnlyAuthentication: true
@@ -248,15 +257,6 @@ resource sqlServer 'Microsoft.Sql/servers@2025-01-01' = {
       principalType: 'Group'
       tenantId: tenant().tenantId
     }
-  }
-}
-
-resource sqlAzureServicesFirewallRule 'Microsoft.Sql/servers/firewallRules@2025-01-01' = if (allowAzureServicesToSql) {
-  parent: sqlServer
-  name: 'AllowAzureServices'
-  properties: {
-    startIpAddress: '0.0.0.0'
-    endIpAddress: '0.0.0.0'
   }
 }
 
@@ -340,11 +340,30 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
 resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
   parent: storage
   name: 'default'
+  properties: {
+    deleteRetentionPolicy: {
+      enabled: true
+      days: 30
+      allowPermanentDelete: false
+    }
+    containerDeleteRetentionPolicy: {
+      enabled: true
+      days: 30
+    }
+  }
 }
 
 resource documents 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobService
   name: 'documents'
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+resource extractedText 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: 'extracted-text'
   properties: {
     publicAccess: 'None'
   }
@@ -377,10 +396,113 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   }
 }
 
+resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' = {
+  name: '${prefix}-vnet'
+  location: location
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        virtualNetworkAddressPrefix
+      ]
+    }
+    subnets: [
+      {
+        name: 'container-apps'
+        properties: {
+          addressPrefix: containerAppsSubnetAddressPrefix
+          delegations: [
+            {
+              name: 'container-apps'
+              properties: {
+                serviceName: 'Microsoft.App/environments'
+              }
+            }
+          ]
+        }
+      }
+      {
+        name: 'private-endpoints'
+        properties: {
+          addressPrefix: privateEndpointSubnetAddressPrefix
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
+    ]
+  }
+}
+
+resource containerAppsSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
+  parent: virtualNetwork
+  name: 'container-apps'
+}
+
+resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
+  parent: virtualNetwork
+  name: 'private-endpoints'
+}
+
+resource sqlPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: 'privatelink${az.environment().suffixes.sqlServerHostname}'
+  location: 'global'
+}
+
+resource sqlPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  parent: sqlPrivateDnsZone
+  name: '${prefix}-sql-link'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: virtualNetwork.id
+    }
+  }
+}
+
+// The endpoint belongs in the VNet region, even when SQL is deployed to sqlLocation.
+resource sqlPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+  name: '${prefix}-sql-pe'
+  location: location
+  properties: {
+    subnet: {
+      id: privateEndpointSubnet.id
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'sql'
+        properties: {
+          privateLinkServiceId: sqlServer.id
+          groupIds: [
+            'sqlServer'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+resource sqlPrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+  parent: sqlPrivateEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'sql'
+        properties: {
+          privateDnsZoneId: sqlPrivateDnsZone.id
+        }
+      }
+    ]
+  }
+}
+
 resource environment 'Microsoft.App/managedEnvironments@2025-01-01' = {
   name: '${prefix}-cae'
   location: location
   properties: {
+    vnetConfiguration: {
+      infrastructureSubnetId: containerAppsSubnet.id
+      internal: false
+    }
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {
@@ -562,8 +684,20 @@ module api 'modules/containerApp.bicep' = {
         value: documents.name
       }
       {
+        name: 'Storage__ExtractedTextContainer'
+        value: extractedText.name
+      }
+      {
         name: 'Search__Endpoint'
         value: 'https://${search.name}.search.windows.net'
+      }
+      {
+        name: 'Sql__Server'
+        value: sqlServer.properties.fullyQualifiedDomainName
+      }
+      {
+        name: 'Sql__Database'
+        value: sqlDatabase.name
       }
       {
         name: 'OpenAI__Endpoint'
@@ -588,6 +722,10 @@ module api 'modules/containerApp.bicep' = {
     ]
     secrets: {}
   }
+  dependsOn: [
+    sqlPrivateDnsLink
+    sqlPrivateDnsZoneGroup
+  ]
 }
 
 resource blobContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -781,6 +919,14 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
     maxReplicas: 5
     envVars: [
       {
+        name: 'Storage__BlobEndpoint'
+        value: storage.properties.primaryEndpoints.blob
+      }
+      {
+        name: 'Storage__ExtractedTextContainer'
+        value: extractedText.name
+      }
+      {
         name: 'ServiceBus__Namespace'
         value: '${serviceBus.name}.servicebus.windows.net'
       }
@@ -832,6 +978,8 @@ module worker 'modules/containerApp.bicep' = if (!empty(workerImage)) {
   }
   dependsOn: [
     workerRegistryAcrPull
+    sqlPrivateDnsLink
+    sqlPrivateDnsZoneGroup
   ]
 }
 
@@ -901,9 +1049,19 @@ resource workerServiceBusReceiver 'Microsoft.Authorization/roleAssignments@2022-
   }
 }
 
-// Sprint 4: Grant Worker managed identity SQL database access (db_datawriter, db_datareader roles via Entra user).
-// The actual SQL role assignment happens in sql/schema.sql via CREATE USER [<worker-identity-name>] FROM EXTERNAL PROVIDER.
-// Here we just note that the Worker's system-assigned managed identity must be granted these SQL roles after deployment.
+resource workerExtractedTextReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(workerImage)) {
+  name: guid(extractedText.id, '${prefix}-worker', blobReaderRoleId)
+  scope: extractedText
+  properties: {
+    roleDefinitionId: blobReaderRoleId
+    principalId: worker!.outputs.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// SQL data-plane access is not granted by Azure RBAC. After deployment, use sql/schema.sql
+// from a VNet-connected host to create contained users for BOTH API and Worker system identities,
+// granting db_datareader/db_datawriter (or narrower table grants) for status/delete/restore and ingestion.
 
 // Sprint 5: Resource group budget with email notifications at 80% and 100% thresholds.
 // Note: Budget alerts require that budgetNotificationEmail is non-empty. Email recipients must accept
@@ -962,4 +1120,5 @@ output embeddingDeploymentName string = embeddingDeployment.name
 output chatDeploymentName string = deployChat ? chatDeploymentName : ''
 output sqlServerFqdn string = sqlServer.properties.fullyQualifiedDomainName
 output sqlDatabaseName string = sqlDatabase.name
+output apiPrincipalId string = api.outputs.principalId
 output workerPrincipalId string = !empty(workerImage) ? worker!.outputs.principalId : ''
