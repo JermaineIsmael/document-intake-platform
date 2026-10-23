@@ -40,7 +40,7 @@ instructions, not proof that every planned sprint outcome was delivered.
 
 | Feature / task | Implementation | Current behavior / remaining work |
 |---|---|---|
-| Entra-authenticated API and protected-route fallback policy | Implemented | Valid-token upload and anonymous rejection observed; not per-document authorization |
+| Entra-authenticated API and protected-route fallback policy | Implemented | Valid-token upload and anonymous rejection observed |
 | Development-only authentication bypass | Implemented | Requires Development environment and explicit setting; ignored in Staging/Production |
 | Process health endpoints | Implemented | Anonymous `/health` and `/health/live`; not downstream dependency readiness checks |
 | Multipart PDF/DOCX upload validation | Implemented | Exactly one `file`; extension/content checks and configurable limit, default 25 MiB |
@@ -48,11 +48,11 @@ instructions, not proof that every planned sprint outcome was delivered.
 | Private original-document storage | Implemented | Originals stored in Blob Storage; upload does not wait for extraction/indexing |
 | Blob-created extraction trigger | Implemented | Event Grid invokes the isolated .NET Extractor Function |
 | Document Intelligence text extraction | Implemented | Extracted text is passed to downstream ingestion |
-| Extracted-text queue messaging | Implemented | Inline shared message through Service Bus; large serialized text can exceed the Standard message limit |
-| Large-text claim-check messaging | Not implemented | Store extracted text privately and queue a validated reference; update contracts, access, compatibility, cleanup, and tests without truncation |
+| Extracted-text queue messaging | Implemented | Service Bus carries a compact claim-check reference; extracted text remains in a private Blob container |
+| Large-text claim-check messaging | Implemented | Extractor stores complete text in Blob; Worker validates document/owner metadata before download; not yet live-tested |
 | Empty-text handling | Partial | Worker logs a warning and skips indexing/SQL; explicit user-visible no-text status is absent |
-| Document lifecycle/status API | Not implemented | Persist queued/processing/completed/failed states and implement authorized reads; upload Location currently has no matching GET route |
-| Document ownership and tenant isolation | Not implemented | No per-document access boundaries; authentication alone does not isolate document data |
+| Document lifecycle/status API | Partial | Owner-scoped status reports queued/indexed/deleted; processing/failed states and user-visible extraction failures are not modeled |
+| Document ownership and tenant isolation | Implemented in code | Entra `oid` is persisted and owner-scoped status/delete/restore endpoints return no access to other owners; legacy null-owner records remain inaccessible; live authorization test pending |
 
 ### Worker, Search, and SQL
 
@@ -63,7 +63,7 @@ instructions, not proof that every planned sprint outcome was delivered.
 | Azure OpenAI embeddings | Implemented | Batched `text-embedding-3-small` vectors with count/index/dimension validation |
 | Search index provisioning and vector schema | Implemented | Worker ensures index schema; 1536-dimensional vectors |
 | Search chunk upserts | Implemented | Batched uploads with deterministic document/chunk IDs and per-document failure propagation |
-| SQL document metadata | Implemented | Transactional upsert of source, chunk count, and indexed timestamp |
+| SQL document metadata | Implemented | Owner-aware transactional upsert of source, chunk count, and indexed timestamp |
 | Same-document replay idempotency | Implemented | Stable Search keys and SQL upserts; not content deduplication across new uploads |
 | Retry and poison-message handling | Implemented | Invalid messages dead-lettered; processing failures retry up to configured delivery limit |
 | Queue duplicate detection | Implemented | Infrastructure configures a 10-minute window; replay must account for suppression |
@@ -99,7 +99,7 @@ instructions, not proof that every planned sprint outcome was delivered.
 | Automated SQL schema/grant migrations | Not implemented | Pipeline does not execute database bootstrap/migrations |
 | Existing-server SQL authentication transition | Partial | Entra configuration and manual remediation exist; safe repeatable migration/drift handling remains |
 | Development SQL firewall opt-in | Implemented | Broad Azure-services access enabled in dev; authentication/database permissions still required |
-| Restricted production SQL connectivity | Not implemented | Choose and validate private networking or controlled egress; remove broad Azure-services access |
+| Restricted SQL connectivity | Implemented in Bicep, not deployed | VNet-integrated Container Apps, SQL private endpoint/private DNS, and disabled SQL public access; plan address space, migrate/recreate existing Container Apps environment, and verify private connectivity before release |
 | Temporary firewall-rule cleanup | Partial | Stable development access restored; inventory/removal of obsolete test exceptions remains |
 | Populated-environment bootstrap safeguards | Not implemented | Prevent accidental sample-image deployment; normal application releases should not rerun bootstrap |
 
@@ -120,13 +120,15 @@ instructions, not proof that every planned sprint outcome was delivered.
 | Load-test tooling | Implemented | Concurrent-upload script and SQL completion query exist |
 | Load, latency, quota, and cost acceptance | Pending | Measure throughput, throttling, queue growth, scaling, and spend; no approved/measured SLA |
 | Live RAG quality and safety tests | Pending | Requires completed RAG; test relevance, citations, no-context, malicious content, access control, and throttling |
-| Retention/deletion and recovery automation | Not implemented | Define originals/derived-data retention, cleanup, sensitive-data handling, and backup/restore procedures |
+| User deletion and restore | Implemented in code, not live-tested | Owner can soft-delete and restore within 30 days; SQL tombstones, Search visibility, and Blob soft-delete are coordinated |
+| Automated 90-day retention cleanup | Implemented in code, not live-tested | Hourly Worker sweep hides expired Search chunks, soft-deletes source/extracted blobs, then purges Search/SQL metadata at expiry; Blob soft-delete retains recoverable data for up to 30 days, but the application restore window has expired |
+| Backup/restore and disaster recovery | Not implemented | No cross-region recovery plan, Search backup, or recovery exercise |
 | Backup/restore and disaster-recovery exercises | Pending | Define recovery objectives and record successful exercises |
 | Architecture, development, product, and operational documentation | Implemented | Topic docs, runbooks, and deployment evidence exist; historical reviews are not current certification |
 | Production readiness approval | Pending | Requires network/data isolation, alerting, recovery, performance/cost evidence, and agreed operational ownership/SLOs |
 
-The accepted small-document milestone does **not** establish large-payload
-support, working RAG, exhaustive replay safety, or production readiness.
+The accepted small-document milestone does **not** establish live claim-check
+processing, working RAG, exhaustive replay safety, or production readiness.
 The supplied Search snapshot contains 18 chunks across nine IDs, but 11 chunks
 belong to the two excluded test messages; only seven matching SQL/Search
 documents are accepted verification samples.
@@ -313,8 +315,9 @@ Each upload gets a new GUID and writes with an If-None-Match condition.
 
 `queued` is the upload API's acceptance status; extraction and queue delivery
 happen asynchronously through the Sprint 2 pipeline described below. The API
-does not wait for Document Intelligence or Service Bus, and
-`GET /documents/{documentId}` is not implemented.
+does not wait for Document Intelligence or Service Bus. Owner-scoped
+`GET /documents/{documentId}` returns the current queued/indexed/deleted status;
+it does not yet expose a detailed extraction-failure state.
 
 ### Testing Entra authentication locally
 
@@ -902,21 +905,21 @@ When a blob is created in the private `documents` container, the Event Grid
 system topic invokes `ExtractDocument`. The function validates the event's
 storage host and container, reads the document ID from the second-to-last blob
 path segment, downloads the blob with managed identity, and analyzes it with
-the `prebuilt-read` model. It sends JSON for the shared
-`DocumentMessage` to the `extracted-documents` queue. The queue message has
-camel-case `sourceUrl`, `documentId`, and `content` properties. Its
-`MessageId` is the document GUID; queue
+the `prebuilt-read` model. It stores the complete extracted text in the private
+`extracted-text` Blob container and sends a compact claim-check for the shared
+`DocumentMessage` to the `extracted-documents` queue. The message carries the
+owner ID and document-specific extracted-text reference rather than inline
+content. Its `MessageId` is the document GUID; queue
 duplicate detection suppresses duplicate deliveries for ten minutes. The
 function does not log extracted text or document content.
 
-Service Bus Standard has a finite 256 KiB message limit. The function measures
-the serialized message against the sender's actual batch limit before sending;
-if the full extraction does not fit, it logs only the document ID and fails the
-Event Grid invocation (so it is not reported as queued). Event Grid retries
+Service Bus Standard has a finite 256 KiB message limit. The claim-check keeps
+extracted text out of the queue payload; the Worker verifies the reference path
+and the Blob's document/owner metadata before downloading. Large-document
+processing still needs live Azure verification and remains bounded by Blob,
+Document Intelligence, embedding, and Search service limits. Event Grid retries
 failed delivery and eventually expires events per the configured retry policy;
-it does not route those failures to the Service Bus dead-letter queue. Large
-extractions therefore require a later design such as storing extracted text in
-Blob Storage and queueing a reference or splitting text into bounded chunks.
+it does not route those failures to the Service Bus dead-letter queue.
 
 The Event Grid subscription is filtered to `Microsoft.Storage.BlobCreated`
 events under `/blobServices/default/containers/documents/`, sends one event per
@@ -1323,8 +1326,9 @@ one `dbo.Documents` row. Running the same message through the worker twice
 leaves the same result.
 
 **Large document check.** Upload a `.docx` or text PDF with at least 35,100
-characters of text (50+ chunks) but well under ~200,000 characters (the
-Sprint 2 extractor rejects messages over the 256 KiB Service Bus limit). For
+characters of text (50+ chunks). The claim-check keeps the extracted text out
+of the Service Bus payload; service-side extraction, embedding, and indexing
+quotas still apply. For
 example, with `pip install python-docx`:
 
 ```powershell
@@ -1584,9 +1588,9 @@ not close production readiness or prove that every documented test was run.
    - Test payload materials exist; protection is not established by a live end-to-end RAG test
 
 2. **Access Scoping**
-   - Single-tenant deployment: all authenticated users can access all indexed documents
-   - Multi-tenant variant not implemented (would require owner field in AI Search and SQL, thread through upload/search)
-   - Document this design in your deployment notes if scope isolation becomes a requirement
+   - Document lifecycle endpoints enforce owner ID from the Entra `oid` claim; SQL records and Search chunks include owner IDs.
+   - Owner-filtered RAG retrieval remains unimplemented; no RAG endpoint should be enabled until its retrieval query enforces the authenticated owner.
+   - Existing records with null owner IDs are inaccessible through owner-scoped document APIs until explicitly reconciled.
 
 3. **Cost Guardrails** ([docs/runbooks/cost-guardrails.md](docs/runbooks/cost-guardrails.md))
    - Service Bus `maxDeliveryCount: 5` bounds retry costs
@@ -1629,7 +1633,7 @@ not close production readiness or prove that every documented test was run.
 ### Known Limitations
 
 - **Prompt Injection**: Defensive prompt exists, but incomplete RAG prevents a live protection claim; further safety testing is required.
-- **Access Scoping**: Single-tenant; all authenticated users query all documents. Multi-tenant variant deferred.
+- **Access Scoping**: Document status/delete/restore are owner-scoped. RAG retrieval is incomplete and must implement owner filtering before it is enabled.
 - **Throttling**: If Worker load exceeds OpenAI or Search capacity, HTTP 429s occur. Increase TPM or reduce `MaxConcurrentCalls` in Worker settings.
 - **Vector Search**: RAG embedding result handling/retrieval are placeholders. Disabled chat returns 503; enabling chat alone still does not produce answers.
 

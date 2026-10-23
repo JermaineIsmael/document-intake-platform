@@ -79,6 +79,29 @@ No extracted personal document content is reproduced in this report.
 This does **not** establish large-document support, chat functionality, load
 capacity, disaster recovery, or production network isolation.
 
+## 1a. Critical blocker implementation validation
+
+After the Azure evidence above was collected, code and infrastructure changes
+were made for document ownership, private SQL networking, extracted-text
+claim-check messaging, and retention/deletion. Current repository validation:
+
+| Check | Result |
+|---|---|
+| `dotnet build DocIntake.sln --configuration Release --no-restore --warnaserror` | Passed; zero warnings and errors |
+| `dotnet test DocIntake.sln --configuration Release --no-build` | Passed; 137 passed, 0 failed, 0 skipped |
+| Bicep template build | Passed |
+| Bicep parameter compilation | Passed |
+| Azure what-if/deployment or live blocker verification | Not performed |
+
+The new code is not yet deployed. The seven SQL/Search samples and empty queue
+refer to the earlier deployed version; they do not verify owner checks,
+claim-check ingestion, private networking, or retention.
+
+The queue contract has changed: old messages without `OwnerId` and an extracted
+text reference will fail the new Worker validation. Before deploying the new
+Worker, confirm the queue is drained or intentionally disposition old messages;
+do not silently replay them as successful ingestions.
+
 ## 2. Implemented architecture
 
 ```mermaid
@@ -89,12 +112,16 @@ flowchart LR
     EG --> Extractor[Azure Function: ExtractDocument]
     Extractor --> DI[Document Intelligence: prebuilt-read]
     DI --> Extractor
-    Extractor --> SB[Service Bus: extracted-documents]
+    Extractor --> Text[Private extracted-text Blob]
+    Extractor --> SB[Service Bus claim-check: extracted-documents]
     SB --> Worker[Container Apps Worker]
+    Worker --> Text
     Worker --> Embeddings[Azure OpenAI embeddings]
     Embeddings --> Worker
     Worker --> Search[AI Search: document-chunks]
-    Worker --> SQL[Azure SQL: dbo.Documents]
+    Worker --> SQL[Private Azure SQL: dbo.Documents]
+    Worker -. hourly retention .-> Original
+    Worker -. hourly retention .-> Search
     EG --> EGDL[Blob dead-letter container]
     SB --> SBDL[Service Bus dead-letter subqueue]
     API -. optional RAG /ask .-> Search
@@ -112,17 +139,19 @@ flowchart LR
    `ExtractDocument`.
 5. The Function validates the event source and uses Document Intelligence
    `prebuilt-read` to extract text.
-6. The Function sends the shared `DocumentMessage` JSON contract:
-   `sourceUrl`, `documentId`, and inline `content`. Message ID is the document ID.
-7. The Worker splits text into 800-character chunks with 100-character overlap,
+6. The Function stores the extracted text under
+   `extracted-text/<document-id>/content.txt`, with owner metadata, and sends
+   a compact `DocumentMessage` reference. Message ID is the document ID.
+7. The Worker verifies the document-specific path and owner metadata, downloads
+   the text, splits it into 800-character chunks with 100-character overlap,
    generates embeddings, and uploads deterministic Search IDs
    `<document-id>-<chunk-index>`.
-8. After Search upload succeeds, the Worker upserts SQL metadata and completes
+8. After Search upload succeeds, the Worker upserts owner-aware SQL metadata and completes
    the Service Bus message.
 
 HTTP 202 acknowledges storage/acceptance, not completed extraction or indexing.
-The returned `Location` header is not a working status API:
-`GET /documents/{id}` is not implemented.
+The returned `Location` header maps to an owner-scoped status API. The API
+currently reports queued/indexed/deleted, not a detailed failed-extraction state.
 
 ### Failure and replay behavior
 
@@ -411,30 +440,32 @@ access tokens, keys, connection strings, or sensitive document content.
 
 | Priority | Task / limitation | Completion criteria |
 |---|---|---|
-| High | Large-text claim-check design | Extracted text stored privately in Blob Storage; queue carries a validated reference; Worker retrieves it; identities, contracts, retries, cleanup, and tests updated |
-| High before production | Restricted SQL connectivity | Choose private networking/DNS or supported controlled-egress architecture, review cost/migration, remove broad Azure-services rule |
+| High | Live claim-check verification | Deploy Extractor/Worker and ingest a large non-sensitive document; confirm owner/document metadata checks, indexing, and queue settlement |
+| High before production | Deploy and verify private SQL networking | Review VNet CIDRs, migrate/recreate existing Container Apps environment if needed, deploy private endpoint/DNS, verify API/Worker SQL connectivity and public access denial |
 | High | Existing SQL authentication drift/migration | Verify group admin and Entra-only state; support repeat deployments without weakening authentication or losing admin access |
 | Medium | Remove temporary firewall exceptions | Inventory/remove only obsolete named test rules after stable access is verified |
 | Medium | Complete and activate Chat/RAG | Replace embedding/retrieval placeholders, implement grounded answers, obtain quota, then enable and verify `/ask`, citations, cost and safety |
-| Medium | Document status API | Define/persist lifecycle and failure states; implement authorized status retrieval instead of unusable Location target |
+| Medium | Complete document status/failure states | Add processing/failed states and user-visible extraction failure handling; current status is queued/indexed/deleted |
 | Medium | Empty-text UX | Define explicit no-text status instead of relying on warning and absent SQL row |
 | Medium | Failure/cost alerts | Validate alerts for queue backlog, both dead-letter destinations, Worker failures, extraction errors, and budget notification delivery |
 | Medium | Failure/replay testing | Prove retry/idempotency under lock loss, dependency failure, duplicate replay, and recovery; Search and SQL can diverge temporarily |
 | Medium | Load/quota tests | Measure concurrent uploads, latency, embeddings TPM throttling, queue growth, scaling, service limits, and spend |
-| Medium | Retention and recovery | Define original/extracted text retention, dead-letter cleanup, backup/restore tests, and sensitive-data handling |
+| High | Live delete/restore/retention verification | Verify owner deletion, restore before/after 30 days, 90-day expiry, retryable cleanup, and final purge |
+| High | Backup and disaster recovery | Define recovery objectives and backup strategy (including Search); complete a cross-service recovery exercise |
 | Medium | Bootstrap safeguards | Prevent accidental bootstrap against a populated environment and verify production image/ingress after deployment |
 
-The inline queue payload is subject to Service Bus Standard's 256 KB message
-limit including overhead; batch admission can reject it. PDF byte size does
-not reliably predict serialized extracted-text size. Do not truncate text as a
-silent workaround.
+The Service Bus contract now uses a Blob claim-check rather than inline
+extracted text, but this change has not been tested against the deployed Azure
+services. Do not treat repository tests or Bicep compilation as live
+verification.
 
 Chat is configured off (`deployChat=false`); a valid authenticated `/ask`
 request is expected to return 503. RAG also contains placeholder embedding
 result handling/retrieval, so enabling a model alone will not complete it.
 Budgets are advisory, not enforcement.
-Public service endpoints and account-level roles remain development trade-offs;
-successful ingestion is not a security or production-readiness approval.
+Other Azure data-plane services retain public endpoints in the current
+configuration; the new private-networking change targets SQL only. Successful
+ingestion is not a security or production-readiness approval.
 
 ## 9. Related documentation
 

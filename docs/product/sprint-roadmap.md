@@ -15,29 +15,30 @@ Dependencies: working development deployment and data-plane operator access.
 
 Exit: [MVP](mvp-definition.md) verification gaps closed or explicitly accepted.
 
-## B. Make large-document processing reliable
+## B. Verify large-document processing
 
-Depends on a contract/storage/security decision; functional evidence from A
-provides the baseline.
+Claim-check implementation is in the repository; live Azure verification and
+compatibility rollout remain.
 
-- Implement private extracted-text claim-check storage and reference validation.
-- Coordinate Extractor/Worker contracts and existing-message compatibility.
-- Define text/package retention, cleanup, oversize behavior, and replay.
-- Add large payload, Unicode, failure, and reference-access tests.
+- Drain or disposition old inline messages before deploying the new contract.
+- Ingest a large non-sensitive PDF/DOCX and verify extracted-text Blob access.
+- Validate retries, Unicode content, Worker indexing, and queue settlement.
 
 Exit: representative large extracted content reaches Search/SQL without data
 truncation or Service Bus message-size failure.
 
-## C. Improve lifecycle and deployment safety
+## C. Verify lifecycle and deployment safety
 
-Status design depends on product decisions; deployment safeguards can proceed
-independently of B.
+Owner-scoped queued/indexed/deleted status, delete/restore, and retention are
+implemented in code; detail states and live evidence remain.
 
-- Persist lifecycle/failure states and implement authorized status retrieval.
+- Add processing/failed lifecycle states and user-visible extraction failures.
+- Live-test cross-owner denial, 30-day restore boundaries, and 90-day cleanup.
 - Define no-text behavior.
 - Support new/existing SQL authentication paths without admin lockout.
 - Protect populated environments from accidental sample-image bootstrap.
-- Remove obsolete test firewall rules after confirming stable access.
+- Deploy private SQL networking after CIDR review and any required Container
+  Apps environment migration; run SQL grants over private connectivity.
 
 Exit: users/operators can distinguish queued, failed, skipped, and completed
 work; repeated deployment does not undermine the running service.
@@ -59,9 +60,11 @@ Exit: real deployed retrieval and answer generation pass agreed product tests.
 Production planning can run in parallel, but release depends on resolved
 ownership, network, security, and reliability requirements.
 
-- Implement chosen private SQL/controlled-egress design and revoke broad access.
-- Add alerts, retention/deletion, recovery exercises, and operator runbooks.
-- Verify ownership/tenant boundaries for document data and retrieval.
+- Verify deployed private SQL access and revoke the legacy broad rule.
+- Add alerts and backup/recovery exercises; retention/delete automation exists
+  in code but has no live evidence.
+- Verify ownership boundaries for document data and implement owner-filtered
+  retrieval before enabling RAG.
 - Measure load, quota behavior, cost, and service recovery; define SLAs/SLOs.
 
 Exit: explicit readiness approval backed by evidence, not a green deployment

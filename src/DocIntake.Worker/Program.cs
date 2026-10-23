@@ -5,6 +5,7 @@ using Azure.Messaging.ServiceBus;
 using Azure.Monitor.OpenTelemetry.Exporter;
 using Azure.Search.Documents;
 using Azure.Search.Documents.Indexes;
+using Azure.Storage.Blobs;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
 using OpenTelemetry;
@@ -32,6 +33,8 @@ internal static class Program
 
         var searchEndpoint = RequireHttpsEndpoint("Search:Endpoint");
         var openAiEndpoint = RequireHttpsEndpoint("OpenAI:Endpoint");
+        var storageEndpoint = RequireHttpsEndpoint("Storage:BlobEndpoint");
+        var extractedTextContainer = RequireValue("Storage:ExtractedTextContainer");
         var embeddingDeployment = RequireValue("OpenAI:EmbeddingDeployment");
         var sqlServer = RequireValue("Sql:Server");
         if (sqlServer.Contains(';', StringComparison.Ordinal) || sqlServer.Contains('='))
@@ -56,6 +59,12 @@ internal static class Program
         builder.Services.AddSingleton(_ => new AzureOpenAIClient(openAiEndpoint, credential).GetEmbeddingClient(embeddingDeployment));
         builder.Services.AddSingleton(_ => new SearchIndexClient(searchEndpoint, credential));
         builder.Services.AddSingleton(_ => new SearchClient(searchEndpoint, IndexSchema.IndexName, credential));
+        builder.Services.AddSingleton(_ => new BlobServiceClient(storageEndpoint, credential)
+            .GetBlobContainerClient(extractedTextContainer));
+        builder.Services.AddSingleton(_ => new OriginalDocumentsContainer(
+            new BlobServiceClient(storageEndpoint, credential)
+                .GetBlobContainerClient(configuration["Storage:ContainerName"] ?? "documents")));
+        builder.Services.AddSingleton<IExtractedTextReader, BlobExtractedTextReader>();
         builder.Services.AddSingleton<IDocumentMetadataRepository>(_ => new DocumentMetadataRepository(sqlConnectionString, credential));
         builder.Services.AddOptions<ChunkIndexerOptions>()
             .Bind(configuration.GetSection(ChunkIndexerOptions.SectionName))
@@ -66,7 +75,17 @@ internal static class Program
             .Bind(configuration.GetSection(IngestionWorkerOptions.SectionName))
             .Validate(options => options.IsValid(), "ServiceBus worker settings are invalid: MaxConcurrentCalls 1-64, MaxDeliveryCount >= 1, lock renewal 1-60 minutes.")
             .ValidateOnStart();
+        builder.Services.AddOptions<RetentionOptions>()
+            .Bind(configuration.GetSection("Retention"))
+            .Validate(options => options.IsValid(), "Retention requires positive day counts, a batch size 1-1000, and sweep interval >= 1 minute.")
+            .ValidateOnStart();
+        builder.Services.AddSingleton<IDocumentRetentionOperations>(services =>
+            new BlobSearchRetentionOperations(
+                services.GetRequiredService<SearchClient>(),
+                services.GetRequiredService<OriginalDocumentsContainer>().Client,
+                services.GetRequiredService<BlobContainerClient>()));
         builder.Services.AddHostedService<IngestionWorker>();
+        builder.Services.AddHostedService<DocumentRetentionWorker>();
 
         // Same rule as Sprints 1 and 2: export only when APPLICATIONINSIGHTS_CONNECTION_STRING is set.
         // Telemetry authenticates with that connection string, like the Sprint 2 Function, so the worker
@@ -85,6 +104,7 @@ internal static class Program
             });
         }
 
+        builder.Services.AddSingleton(TimeProvider.System);
         var host = builder.Build();
         await host.RunAsync();
 

@@ -17,11 +17,14 @@ flowchart LR
     Blob --> Events[Event Grid]
     Events --> Function[Extractor Function]
     Function --> DI[Document Intelligence]
-    Function --> Queue[Service Bus queue]
+    Function --> Text[Private extracted-text Blob]
+    Function --> Queue[Service Bus claim-check]
     Queue --> Worker[Container App Worker]
     Worker --> AI[OpenAI embeddings]
     Worker --> Search[AI Search]
-    Worker --> SQL[SQL metadata]
+    Worker --> SQL[Private SQL metadata]
+    Worker -. retention sweep .-> Blob
+    Worker -. retention sweep .-> Search
 ```
 
 ## Technology and hosting
@@ -34,7 +37,7 @@ flowchart LR
 | Contracts | C# shared records | Referenced project library |
 | Events/messaging | BlobCreated events and JSON messages | Event Grid and Service Bus Standard |
 | AI processing | prebuilt-read and text-embedding-3-small | Document Intelligence and Azure OpenAI |
-| Persistence | Original documents, vector chunks, metadata | Blob Storage, AI Search, Azure SQL |
+| Persistence | Original/extracted text, vector chunks, owner metadata | Blob Storage, AI Search, Azure SQL |
 | Observability | Azure Monitor, Application Insights, OpenTelemetry | Log Analytics-backed telemetry |
 | Delivery | Bicep, Bash, Azure CLI, Docker, Azure DevOps | Ubuntu hosted pipeline agent |
 
@@ -46,9 +49,16 @@ flowchart LR
 - Extractor: 2048 MiB Flex instances, maximum 40, no always-ready configuration.
 - Service Bus: Standard queue with duplicate detection and dead-lettering.
 - AI Search: Basic, one replica and one partition; HNSW vectors, 1536 dimensions.
-- SQL: Basic database; SQL location/name independently configurable.
-- Public service endpoints and the opt-in Azure-services SQL rule are current
-  development choices, not private production networking.
+- SQL: Basic database; SQL location/name independently configurable. Bicep
+  configures a private endpoint and disables public network access.
+- API and Worker share a VNet-integrated Container Apps environment for SQL
+  private DNS/connectivity; adopting this for an existing environment may
+  require migration or recreation.
+- Extracted text is stored in a private Blob container; Service Bus carries a
+  small reference so payload size is not bounded by extracted text size.
+- Owner-scoped document lifecycle operations, 30-day restore window, and
+  90-day automated retention are implemented in code/configuration but not yet
+  live-verified.
 
 ## Key decisions and trade-offs
 
@@ -59,9 +69,11 @@ Managed identity separates application authorization from deployment rights.
 The Worker has a separate image-pull identity to avoid first-deployment RBAC
 ordering problems.
 
-The current inline-text message contract limits document size. The optional
-chat endpoint is present, but retrieval/answer generation is incomplete and
-chat is disabled in development.
+The claim-check removes extracted-text size from the Service Bus message, but
+large-document operation has not been live-verified. The optional chat endpoint
+is present, but retrieval/answer generation is incomplete and chat is disabled
+in development. Backup/disaster recovery remains separate from soft deletion
+and retention.
 
 ## Related material
 
