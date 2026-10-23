@@ -15,6 +15,45 @@ fi
 
 az bicep install
 
+# Resource providers used by infra/main.bicep. Registration is subscription-scoped and needs
+# Microsoft.Resources/subscriptions/providers/register/action (for example, Contributor on the subscription).
+REQUIRED_PROVIDERS=(
+  Microsoft.App
+  Microsoft.CognitiveServices
+  Microsoft.Consumption
+  Microsoft.ContainerRegistry
+  Microsoft.EventGrid
+  Microsoft.Insights
+  Microsoft.KeyVault
+  Microsoft.ManagedIdentity
+  Microsoft.Network
+  Microsoft.OperationalInsights
+  Microsoft.Search
+  Microsoft.ServiceBus
+  Microsoft.Sql
+  Microsoft.Storage
+  Microsoft.Web
+)
+
+ensure_resource_providers() {
+  local provider state subscription_id
+  subscription_id="$(az account show --query id -o tsv)"
+  for provider in "${REQUIRED_PROVIDERS[@]}"; do
+    state="$(az provider show --namespace "$provider" --query registrationState -o tsv 2>/dev/null || echo Unknown)"
+    if [[ "$state" == "Registered" ]]; then
+      continue
+    fi
+    echo "Resource provider '$provider' is '$state'; registering..."
+    if ! az provider register --namespace "$provider" --wait; then
+      echo "Could not register resource provider '$provider' in subscription '$subscription_id'." >&2
+      echo "Ask a subscription Owner/Contributor to run: az provider register --namespace $provider --subscription $subscription_id --wait" >&2
+      exit 1
+    fi
+  done
+}
+
+ensure_resource_providers
+
 report_failed_deployment() {
   local deployment="$1"
   local apps app nested_deployment

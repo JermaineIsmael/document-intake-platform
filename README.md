@@ -657,16 +657,19 @@ supports Container Apps. The deployer needs resource creation permissions and
 permission to create role assignments (for example, Contributor plus Role
 Based Access Control Administrator, or Owner, at the resource-group scope).
 The image publisher needs permission to build/push into ACR.
-Ensure the Microsoft.App, Microsoft.ContainerRegistry, Microsoft.Storage,
-Microsoft.OperationalInsights, Microsoft.Insights, and Microsoft.KeyVault
-resource providers are registered in the subscription. For a new subscription,
-after selecting it, an administrator can register them with:
+Ensure every resource provider used by `infra/main.bicep` is registered in the
+subscription, including Microsoft.Network (VNet, private endpoint, private DNS)
+and Microsoft.Sql. `scripts/deploy-azure.sh` registers missing providers before
+deploying, but this requires subscription-level register permission for the
+pipeline service connection. Otherwise, after selecting the subscription, an
+administrator can register them with:
 
 ```powershell
 foreach ($provider in @('Microsoft.App', 'Microsoft.ContainerRegistry',
     'Microsoft.Storage', 'Microsoft.OperationalInsights', 'Microsoft.Insights',
     'Microsoft.KeyVault', 'Microsoft.ServiceBus', 'Microsoft.CognitiveServices',
-    'Microsoft.EventGrid', 'Microsoft.Web')) {
+    'Microsoft.EventGrid', 'Microsoft.Web', 'Microsoft.Network', 'Microsoft.Sql',
+    'Microsoft.Search', 'Microsoft.ManagedIdentity', 'Microsoft.Consumption')) {
     az provider register --namespace $provider --wait
     if ($LASTEXITCODE -ne 0) { throw "Provider registration failed: $provider" }
 }
