@@ -56,7 +56,8 @@ IDs. Comparing the visible SQL IDs against Search gives:
 | `c0925172-10b8-4d8c-951d-b305fcfccb37` | 1 | 1 | Matching persistence shown |
 | `f04656f8-349b-4176-9ff9-f0b99ee2ca86` | 1 | 1 | Matching persistence shown |
 | `f9b5ba58-c822-48ae-8a9b-e279646295e8` | 1 | 1 | Matching persistence shown |
-
+| `1d0e752e-8be0-4ff4-be82-9b3acb6f0a42` | Not visible | 1 | Message intentionally deleted; excluded from accepted samples |
+| `f4c47239-6486-4f8c-a253-933bbbafbb6f` | Not visible | 10 | Message intentionally deleted; excluded from accepted samples |
 
 Six of the eight previously dead-lettered document IDs now have matching
 Search and SQL evidence, alongside the original successful document. Two
