@@ -76,11 +76,12 @@ which runs inside the VNet and reaches the private endpoint.
   Queue bodies, dead letters, Search content, source/extracted blobs, and logs
   require controlled operator access. The queue now contains a Blob reference,
   not extracted text.
-- The RAG prompt includes untrusted-document guidance, but RAG is incomplete.
-  Prompt text alone is not an isolation or authorization mechanism.
-- Search chunks carry owner IDs and deletion markers. No user-facing retrieval
-  path is implemented yet; any future RAG query must filter by the authenticated
-  owner before it is enabled.
+- The RAG prompt frames document text as untrusted data inside a delimiter that
+  document content cannot close, but prompt text alone is not an isolation or
+  authorization mechanism.
+- Search chunks carry owner IDs and deletion markers. The RAG query filters by the
+  authenticated owner and `isDeleted eq false` inside Azure AI Search (unit-tested,
+  not yet verified against live Azure) and must stay enabled-only after that check.
 - User deletion is recoverable through the API for 30 days. At 90-day retention
   expiry, the Worker soft-deletes blobs and purges Search/SQL metadata; native
   Blob soft-delete remains for up to 30 days, but the application restore

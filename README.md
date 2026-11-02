@@ -3,7 +3,7 @@
 This repository implements authenticated document uploads, Blob Storage and
 Event Grid-triggered extraction, and a Service Bus Worker that generates
 embeddings, indexes Azure AI Search, and persists SQL metadata. The optional
-`/ask` route exists, but RAG retrieval and answer generation are incomplete;
+`/ask` route performs owner-filtered vector retrieval and grounded answer generation in code, but it is not yet verified against live Azure;
 chat is disabled in the current development environment.
 
 See [Deployment, architecture, and verification](docs/development/deployment-verification.md)
@@ -19,7 +19,7 @@ known limitations, and remaining tasks as of 22 October 2026.
 | Product | [Feature roadmap](docs/product/feature-roadmap.md), [MVP definition](docs/product/mvp-definition.md), [product requirements](docs/product/product-requirement.md), [sprint roadmap](docs/product/sprint-roadmap.md) |
 
 These topic documents distinguish implementation from observed verification
-and proposed work. Full RAG retrieval/answer generation is still incomplete;
+and proposed work. RAG retrieval/answer generation is implemented in code but not live-verified;
 the route and model configuration alone do not provide a working chat feature.
 
 ## Feature and task status
@@ -77,11 +77,11 @@ instructions, not proof that every planned sprint outcome was delivered.
 |---|---|---|
 | Authorized `/ask` route and request validation | Implemented | Rejects empty questions; valid authenticated requests return 503 when chat is disabled |
 | Optional chat-model deployment/configuration | Implemented | Bicep supports chat; disabled in development due to quota |
-| Question embedding result handling | Partial | SDK call exists, but embedding extraction returns null |
-| Vector retrieval of relevant chunks | Not implemented | Placeholder path; ingestion vectors do not provide a working retrieval API |
-| Grounded answer generation and source citations | Not implemented | Interface/response shape and prompt exist; retrieval/context/chat completion are not wired end to end |
+| Question embedding result handling | Implemented | Extracts and validates the 1,536-dimensional vector used by the Search index |
+| Vector retrieval of relevant chunks | Implemented (unverified live) | Top-5 vector query on `contentVector`, filtered in Search to the caller's `ownerId` and `isDeleted eq false` |
+| Grounded answer generation and source citations | Implemented (unverified live) | Bounded (12,000 character) per-document `[sourceN]` context, low-temperature chat completion, and `{ answer, sources }` response where `sources[N-1]` is `[sourceN]` |
 | Prompt-injection protection | Partial | Defensive system prompt and test materials exist; no verified live RAG protection guarantee |
-| Complete and enable live RAG | Not implemented | Finish retrieval/generation, enforce document access, obtain quota, and verify quality, citations, errors, and cost before enabling |
+| Complete and enable live RAG | Not verified | Obtain chat quota, enable chat, and verify live retrieval quality, owner isolation, citations, errors, and cost |
 
 ### Azure infrastructure and delivery
 
@@ -1403,22 +1403,22 @@ locked (no `MessageLockLost` errors in the logs and `DeliveryCount` stays 1).
 Sprint 4 adds the `/ask` API route and RAG scaffolding, and containerizes +
 deploys the ingestion Worker to the managed Container Apps environment with
 KEDA scaling. The Worker indexes documents; it does not answer questions.
-Retrieval and answer generation in the API remain incomplete.
+Retrieval and answer generation in the API are implemented but not yet verified live.
 
 ### Changes
 
 1. **API RAG service** — Adds `IRagService` (in [Services/RagService.cs](src/DocIntake.Api/Services/RagService.cs)).
    The `/ask` endpoint (`Endpoints/AskEndpoints.cs`) accepts POST with `{ "question": "..." }` and
    defines the intended `{ "answer": "...", "sources": [...] }` response.
-   Valid authenticated requests return 503 when chat is disabled. If enabled,
-   the current placeholder service returns null and the route returns 404,
-   rather than a grounded answer.
+   Valid authenticated requests return 503 when chat is disabled. Enabling chat
+   requires complete Search and OpenAI configuration at startup. With complete
+   configuration, the service embeds the question, retrieves the caller's top
+   chunks from Search (owner and deletion filters are applied inside Search),
+   builds bounded context, and returns `{ answer, sources }`. No retrieved
+   content returns 404; Search or OpenAI failures return 500.
 
-   **Note:** Full vector search integration is pending Azure.Search.Documents SDK API stabilization.
-   Current implementation returns 404; once the SDK is updated, implement embedding generation,
-   vector search configuration via `VectorSearchOptions`, and chat completion with retrieved context.
-   The route and interface exist; embedding result handling, retrieval, context
-   assembly, and chat completion still need implementation and verification.
+   **Note:** Retrieval and chat completion are covered by unit tests and have not yet
+   been verified against live Azure Search/OpenAI resources.
 
 2. **Key Vault secret for AI Search query key** — `main.bicep` stores the search service's
    query key in Key Vault, and the API managed identity receives the "Key Vault Secrets User"
@@ -1556,8 +1556,10 @@ and grants after every infrastructure deployment. See [Database migrations](#dat
 #### Step 6: Test the /ask endpoint
 
 Once the Worker is running and documents are indexed, test the `/ask` endpoint.
-**Current behavior:** Returns 404 until vector search SDK implementation is complete.
-**Expected final behavior** (after SDK fix):
+**Current behavior:** Disabled chat returns 503. With chat enabled and complete
+configuration, the route returns a grounded answer and sources from the caller's own
+indexed documents (404 when nothing relevant is retrieved).
+**Expected response:** (live checks: [docs/runbooks/ask-verification.md](docs/runbooks/ask-verification.md))
 
 ```powershell
 $askBody = @{ question = "What is the main topic of this document?" } | ConvertTo-Json
@@ -1607,9 +1609,9 @@ Insights → Logs → filter `type='Container App'`), and verify the queue is no
 If queue messages are accumulating, scale up manually by editing the Container App's
 replicas or adjust the KEDA threshold.
 
-**/ask endpoint always returns 404:** This is expected while the Azure.Search.Documents
-vector search API is pending finalization. Once the SDK is updated, regenerate the
-`RagService` implementation and redeploy the API.
+**/ask endpoint returns 404:** No non-deleted chunks owned by the caller were retrieved
+(for example, the document is not yet indexed, was deleted, or belongs to another user).
+Confirm the document reached `indexed` status and that the same Entra identity is used.
 
 ## Sprint 5: Hardening, Resilience, and Observability
 
@@ -1627,7 +1629,7 @@ not close production readiness or prove that every documented test was run.
 
 2. **Access Scoping**
    - Document lifecycle endpoints enforce owner ID from the Entra `oid` claim; SQL records and Search chunks include owner IDs.
-   - Owner-filtered RAG retrieval remains unimplemented; no RAG endpoint should be enabled until its retrieval query enforces the authenticated owner.
+   - RAG retrieval applies the authenticated owner and `isDeleted eq false` filters inside Azure AI Search; this isolation is covered by unit tests but not yet verified against live Azure.
    - Existing records with null owner IDs are inaccessible through owner-scoped document APIs until explicitly reconciled.
 
 3. **Cost Guardrails** ([docs/runbooks/cost-guardrails.md](docs/runbooks/cost-guardrails.md))
@@ -1670,10 +1672,10 @@ not close production readiness or prove that every documented test was run.
 
 ### Known Limitations
 
-- **Prompt Injection**: Defensive prompt exists, but incomplete RAG prevents a live protection claim; further safety testing is required.
-- **Access Scoping**: Document status/delete/restore are owner-scoped. RAG retrieval is incomplete and must implement owner filtering before it is enabled.
+- **Prompt Injection**: Defensive prompt and delimiter framing of untrusted document text exist, but no live end-to-end test establishes protection; further safety testing is required.
+- **Access Scoping**: Document status/delete/restore and RAG retrieval are owner-scoped in code; live cross-owner verification is still required.
 - **Throttling**: If Worker load exceeds OpenAI or Search capacity, HTTP 429s occur. Increase TPM or reduce `MaxConcurrentCalls` in Worker settings.
-- **Vector Search**: RAG embedding result handling/retrieval are placeholders. Disabled chat returns 503; enabling chat alone still does not produce answers.
+- **Vector Search**: Embedding, owner-filtered retrieval, and grounded generation are implemented but not live-verified. Disabled chat returns 503; a nearest-neighbour search always returns the top chunks, so unrelated questions rely on the model's "not enough information" response.
 
 ## Monitoring
 

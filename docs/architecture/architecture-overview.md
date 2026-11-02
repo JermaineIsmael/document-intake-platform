@@ -71,9 +71,9 @@ ordering problems.
 
 The claim-check removes extracted-text size from the Service Bus message, but
 large-document operation has not been live-verified. The optional chat endpoint
-is present, but retrieval/answer generation is incomplete and chat is disabled
-in development. Backup/disaster recovery remains separate from soft deletion
-and retention.
+is implemented in code (owner-filtered retrieval and grounded answers) but not
+live-verified, and chat is disabled in development. Backup/disaster recovery
+remains separate from soft deletion and retention.
 
 ## Related material
 

@@ -1,5 +1,6 @@
 using Azure.Search.Documents.Indexes;
 using Azure.Search.Documents.Indexes.Models;
+using DocIntake.Shared;
 
 namespace DocIntake.Worker;
 
@@ -11,7 +12,7 @@ public static class IndexSchema
 
     // text-embedding-3-small returns 1536 dimensions by default (also its maximum). The model accepts
     // a smaller "dimensions" request option; the embedding caller must not set it unless this changes too.
-    public const int EmbeddingDimensions = 1536;
+    public const int EmbeddingDimensions = SemanticSearchDefaults.EmbeddingDimensions;
 
     public static SearchIndex Build() => new(IndexName)
     {

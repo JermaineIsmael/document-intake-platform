@@ -75,11 +75,16 @@ refreshable access-token callback. Same-ID replay updates a single row.
 
 ## RAG implementation boundary
 
-[RagService](../../src/DocIntake.Api/Services/RagService.cs) is a partial
-implementation: embedding extraction returns null, retrieval is a placeholder,
-and no complete answer-generation flow runs. Enabling a chat model alone does
-not complete RAG. Development explicitly disables chat, producing 503 for valid
-authenticated requests; configured placeholder paths can produce 404.
+[RagService](../../src/DocIntake.Api/Services/RagService.cs) orchestrates
+question embedding ([AzureOpenAiQuestionEmbedder](../../src/DocIntake.Api/Services/AzureOpenAiQuestionEmbedder.cs)),
+owner-filtered vector retrieval ([AzureSearchChunkRetriever](../../src/DocIntake.Api/Services/AzureSearchChunkRetriever.cs)),
+bounded context assembly ([RagContextBuilder](../../src/DocIntake.Api/Services/RagContextBuilder.cs)), and
+grounded chat completion ([AzureOpenAiAnswerGenerator](../../src/DocIntake.Api/Services/AzureOpenAiAnswerGenerator.cs)).
+Enabling chat requires complete Search and OpenAI configuration at startup.
+Development explicitly disables chat, producing 503 for valid authenticated
+requests. When enabled, the endpoint returns 200 with `{ answer, sources }`, 404
+when no owned, non-deleted chunk is retrieved, and 500 for dependency failures.
+This path is unit-tested but not yet verified against live Azure resources.
 
 ## Retention and recovery
 

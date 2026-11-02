@@ -129,15 +129,25 @@ else
 var openAiEndpoint = builder.Configuration["OpenAI:Endpoint"];
 var embeddingDeployment = builder.Configuration["OpenAI:EmbeddingDeployment"];
 var chatDeployment = builder.Configuration["OpenAI:ChatDeployment"];
-var chatEnabled = builder.Configuration.GetValue("OpenAI:ChatEnabled", true);
-// Register RAG service only if all config values are present
-var hasRagConfig = chatEnabled && !string.IsNullOrWhiteSpace(searchEndpoint)
-    && !string.IsNullOrWhiteSpace(openAiEndpoint)
-    && !string.IsNullOrWhiteSpace(embeddingDeployment)
-    && !string.IsNullOrWhiteSpace(chatDeployment);
+var chatEnabled = builder.Configuration.GetValue("OpenAI:ChatEnabled", false);
 
-if (hasRagConfig)
+if (chatEnabled)
 {
+    var missingSettings = new[]
+    {
+        (Key: "Search:Endpoint", Value: searchEndpoint),
+        (Key: "OpenAI:Endpoint", Value: openAiEndpoint),
+        (Key: "OpenAI:EmbeddingDeployment", Value: embeddingDeployment),
+        (Key: "OpenAI:ChatDeployment", Value: chatDeployment)
+    }.Where(setting => string.IsNullOrWhiteSpace(setting.Value))
+        .Select(setting => setting.Key)
+        .ToArray();
+    if (missingSettings.Length > 0)
+    {
+        throw new InvalidOperationException(
+            $"Chat is enabled, but required configuration is missing: {string.Join(", ", missingSettings)}.");
+    }
+
     if (!Uri.TryCreate(searchEndpoint, UriKind.Absolute, out var searchUri) || searchUri?.Scheme != Uri.UriSchemeHttps)
     {
         throw new InvalidOperationException("Search:Endpoint must be an absolute HTTPS URL.");
@@ -149,16 +159,18 @@ if (hasRagConfig)
     }
 
     var credential = new DefaultAzureCredential();
-    builder.Services.AddSingleton(_ => new AzureOpenAIClient(openAiUri, credential));
+    builder.Services.AddSingleton(_ => new AzureOpenAIClient(openAiUri!, credential));
     builder.Services.AddSingleton(services =>
-        services.GetRequiredService<AzureOpenAIClient>().GetEmbeddingClient(embeddingDeployment));
+        services.GetRequiredService<AzureOpenAIClient>().GetEmbeddingClient(embeddingDeployment!));
     builder.Services.AddSingleton(services =>
-        services.GetRequiredService<AzureOpenAIClient>().GetChatClient(chatDeployment));
+        services.GetRequiredService<AzureOpenAIClient>().GetChatClient(chatDeployment!));
+    builder.Services.AddSingleton<IQuestionEmbedder, AzureOpenAiQuestionEmbedder>();
+    builder.Services.AddSingleton<IDocumentChunkRetriever, AzureSearchChunkRetriever>();
+    builder.Services.AddSingleton<IGroundedAnswerGenerator, AzureOpenAiAnswerGenerator>();
     builder.Services.AddSingleton<IRagService, RagService>();
 }
 else
 {
-    // Register null RAG service for tests that don't provide config
     builder.Services.AddSingleton<IRagService>(_ => new NullRagService());
 }
 

@@ -470,7 +470,7 @@ access tokens, keys, connection strings, or sensitive document content.
 | High before production | Deploy and verify private SQL networking | Review VNet CIDRs, migrate/recreate existing Container Apps environment if needed, deploy private endpoint/DNS, verify API/Worker SQL connectivity and public access denial |
 | High | Live SQL migration and authentication verification | Run the pipeline against the existing server; confirm the drift report, converged group admin/Entra-only state, migrator group membership, successful migration job, and API/Worker SQL access through their new identities |
 | Medium | Remove temporary firewall exceptions | Inventory/remove only obsolete named test rules after stable access is verified |
-| Medium | Complete and activate Chat/RAG | Replace embedding/retrieval placeholders, implement grounded answers, obtain quota, then enable and verify `/ask`, citations, cost and safety |
+| Medium | Verify and activate Chat/RAG | Obtain quota, then enable and verify `/ask` live: retrieval quality, owner isolation, citations, cost and safety |
 | Medium | Live document status verification | Observe `extracting`, `processing`, `indexed`, `noText`, an `UnsupportedContent` failure, and a stale-processing timeout in Azure |
 | Medium | Failure/cost alerts | Validate alerts for queue backlog, both dead-letter destinations, Worker failures, extraction errors, and budget notification delivery |
 | Medium | Failure/replay testing | Prove retry/idempotency under lock loss, dependency failure, duplicate replay, and recovery; Search and SQL can diverge temporarily |
@@ -485,8 +485,10 @@ services. Do not treat repository tests or Bicep compilation as live
 verification.
 
 Chat is configured off (`deployChat=false`); a valid authenticated `/ask`
-request is expected to return 503. RAG also contains placeholder embedding
-result handling/retrieval, so enabling a model alone will not complete it.
+request is expected to return 503. Embedding, owner-filtered retrieval, and
+grounded generation are implemented and unit-tested but unverified live; enabling
+chat requires quota and live checks of retrieval, owner isolation, citations and cost.
+Enabling chat with incomplete Search or OpenAI configuration fails startup.
 Budgets are advisory, not enforcement.
 Other Azure data-plane services retain public endpoints in the current
 configuration; the new private-networking change targets SQL only. Successful

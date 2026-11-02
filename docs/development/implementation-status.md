@@ -19,7 +19,7 @@ the blocker changes has occurred.
 | SQL authentication drift | Implemented, not deployed | Pipeline detects an existing server, logs admin/Entra-only state, converges it with child resources, and verifies the result |
 | Document lifecycle status | Implemented in code | `GET /documents/{id}` reports queued/extracting/processing/indexed/noText/failed/deleted with caller-safe failure details; Extractor status events flow through the `document-status` queue; stale documents time out. Live verification pending |
 | Small-document end-to-end ingestion | Complete for prior deployment | Seven accepted SQL rows each match one Search chunk; latest observed queue and dead-letter counts were zero |
-| RAG retrieval and answer generation | Incomplete | Question embedding extraction/retrieval remain placeholders; no owner-filtered retrieval or working answer generation |
+| RAG retrieval and answer generation | Implemented in code; not live-verified | Owner-filtered vector retrieval, bounded context, and grounded answers with sources are unit-tested; live Azure verification and chat quota remain |
 | Backup/disaster recovery | Not implemented | No cross-region recovery, Search backup, or exercised recovery objectives |
 | Operational alerting and release approval | Partial | Runbooks and telemetry exist; alert delivery, private networking, live retention, performance/cost, and production sign-off remain |
 

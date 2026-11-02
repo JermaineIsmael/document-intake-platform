@@ -12,7 +12,7 @@ business-flow checks; none substitutes for the others.
 | Extractor | Event validation, claim-check storage/message contract, failure propagation, telemetry initialization | Azure Function host indexing and large-document behavior must also be tested live |
 | Worker | TextChunker, IndexSchema, claim-check validation, ChunkIndexer, IngestionWorker, retention tests | Real quotas/network permissions are not mock behavior |
 | SQL | DocumentMetadataRepository LocalDB tests applying the real `sql/migrations` scripts, including replay/concurrency, forward-only status transitions, stale timeouts, and CHECK constraints; migration runner checksum/ordering tests | Windows LocalDB tests skip when unavailable; Ubuntu CI does not prove these executed |
-| RAG | Service/endpoint tests for current behavior | Do not interpret placeholder/null behavior as successful retrieval |
+| RAG | Service, retriever, context-builder, generator, embedder, and endpoint tests with fakes/mocked SDK clients (no Azure), including enforced-auth owner scoping with signed JWTs; opt-in live checks in `AskAzureIntegrationTests` ([runbook](../runbooks/ask-verification.md)) | Unit tests do not prove live retrieval quality, owner isolation in Search, or model behaviour; live checks are skipped unless configured |
 | Infrastructure | Bicep compilation and targeted compiled-ARM assertions | Compilation does not prove capacity, permission propagation, or runtime health |
 | Deployment | Pipeline build/tests, image publish, Function indexing gate | Provisioned/Healthy resource state can coexist with app failure |
 
