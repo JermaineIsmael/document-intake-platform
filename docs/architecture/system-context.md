@@ -12,8 +12,10 @@ Baseline: 22 October 2026.
 | Developer | Change code, run tests, prepare releases | Git repository and development services |
 | Deployment identity | Provision resources and publish packages/images | Azure DevOps service connection |
 
-No dedicated end-user web UI is implemented. Tests have used Cloud Shell/curl
-and Azure Portal tools.
+A React web application ([src/DocIntake.Web](../../src/DocIntake.Web)) now
+covers sign-in, upload, document status/delete/restore, and questions. It is
+verified locally but not yet deployed. See the [web application](../frontend/web-app.md)
+document. Earlier tests used Cloud Shell/curl and Azure Portal tools.
 
 ```mermaid
 flowchart TB

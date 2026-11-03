@@ -9,3 +9,7 @@ infra/**/*.json
 .env
 .azurite/
 TestResults/
+
+# Front-end dependencies and build output
+node_modules/
+dist/

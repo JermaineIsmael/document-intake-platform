@@ -39,6 +39,7 @@ if (builder.Environment.IsDevelopment()
     builder.Services.AddSingleton<IAuthorizationHandler, AllowAllAuthorizationHandler>();
 }
 builder.Services.AddHealthChecks();
+builder.Services.AddCors();
 builder.Services.AddOptions<UploadOptions>()
     .Configure<IConfiguration>((options, configuration) =>
     {
@@ -209,6 +210,12 @@ else
     }
 }
 
+// CORS runs before authentication so browser preflight requests (which carry no token) are answered.
+var allowedCorsOrigins = CorsSettings.ReadAllowedOrigins(app.Configuration);
+if (allowedCorsOrigins.Length > 0)
+{
+    app.UseCors(policy => CorsSettings.Configure(policy, allowedCorsOrigins));
+}
 app.UseAuthentication();
 app.UseAuthorization();
 

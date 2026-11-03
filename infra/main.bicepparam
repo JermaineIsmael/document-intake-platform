@@ -34,3 +34,8 @@ param chatCapacity = 10
 // Sprint 5: cost guardrails
 param monthlyBudgetAmount = 50
 param budgetNotificationEmail = 'testbudgetnotif@gmail.com'
+// Front end: Static Web App (Free) hosting src/DocIntake.Web; its origin is added to the API CORS list.
+// The SPA origin must also be a redirect URI on the API app registration (scripts/deploy-azure.sh checks it).
+param deployWebApp = true
+param webAppLocation = 'eastus2'
+param additionalCorsOrigins = []

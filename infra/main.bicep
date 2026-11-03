@@ -92,9 +92,26 @@ param workerPrincipalId string
 ])
 param workerPrincipalType string = 'User'
 
+@description('Create the Static Web App that hosts the React front end (src/DocIntake.Web). Its origin is added to the API CORS allow-list.')
+param deployWebApp bool = true
+
+@description('Static Web App control-plane region. Content is served from a global edge, and Static Web Apps are offered only in these regions.')
+@allowed([
+  'centralus'
+  'eastus2'
+  'eastasia'
+  'westeurope'
+  'westus2'
+])
+param webAppLocation string = 'eastus2'
+
+@description('Extra browser origins allowed to call the API (for example a custom domain). HTTPS only, no path or wildcard.')
+param additionalCorsOrigins string[] = []
+
 var suffix = uniqueString(resourceGroup().id, env)
 var prefix = 'di-${env}-${suffix}'
 var apiName = '${prefix}-api'
+var webAppName = '${prefix}-web'
 var extractorName = 'di${env}${suffix}extractor'
 var serviceBusNamespaceName = '${prefix}-messaging'
 var documentIntelligenceName = 'di${env}${suffix}di'
@@ -713,6 +730,40 @@ resource blobCreatedSubscription 'Microsoft.EventGrid/systemTopics/eventSubscrip
   ]
 }
 
+// Front end (Free tier). Content is uploaded by scripts/deploy-web.sh with the deployment token, so no
+// repository is linked. Pull-request staging environments are disabled.
+resource webApp 'Microsoft.Web/staticSites@2024-04-01' = if (deployWebApp) {
+  name: webAppName
+  location: webAppLocation
+  sku: {
+    name: 'Free'
+    tier: 'Free'
+  }
+  properties: {
+    allowConfigFileUpdates: true
+    stagingEnvironmentPolicy: 'Disabled'
+  }
+}
+
+// ASP.NET Core binds Cors__AllowedOrigins__<n> to the Cors:AllowedOrigins array read by the API.
+var additionalCorsEnvVars = [
+  for (origin, i) in additionalCorsOrigins: {
+    name: 'Cors__AllowedOrigins__${i + 1}'
+    value: origin
+  }
+]
+var corsEnvVars = concat(
+  deployWebApp
+    ? [
+        {
+          name: 'Cors__AllowedOrigins__0'
+          value: 'https://${webApp!.properties.defaultHostname}'
+        }
+      ]
+    : [],
+  additionalCorsEnvVars
+)
+
 module api 'modules/containerApp.bicep' = {
   name: 'docintake-api'
   params: {
@@ -728,7 +779,7 @@ module api 'modules/containerApp.bicep' = {
     additionalUserAssignedIdentityIds: [
       apiSqlIdentity.id
     ]
-    envVars: [
+    envVars: concat([
       {
         name: 'ASPNETCORE_ENVIRONMENT'
         value: 'Production'
@@ -801,7 +852,7 @@ module api 'modules/containerApp.bicep' = {
         name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
         value: insights.properties.ConnectionString
       }
-    ]
+    ], corsEnvVars)
     secrets: {}
   }
   dependsOn: [
@@ -1307,6 +1358,8 @@ resource budget 'Microsoft.Consumption/budgets@2021-10-01' = if (monthlyBudgetAm
 }
 
 output apiFqdn string = api.outputs.fqdn
+output webAppName string = deployWebApp ? webApp!.name : ''
+output webAppHostname string = deployWebApp ? webApp!.properties.defaultHostname : ''
 output acrName string = registry.name
 output storageName string = storage.name
 output serviceBusNamespace string = serviceBus.name

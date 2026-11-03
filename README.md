@@ -16,6 +16,7 @@ known limitations, and remaining tasks as of 22 October 2026.
 |---|---|
 | Architecture | [Overview](docs/architecture/architecture-overview.md), [component design](docs/architecture/component-design.md), [data flow](docs/architecture/data-flow.md), [security](docs/architecture/security.md), [system context](docs/architecture/system-context.md) |
 | Development | [Coding standards](docs/development/coding-standards.md), [implementation status](docs/development/implementation-status.md), [sprint history](docs/development/sprint-history.md), [testing strategy](docs/development/testing-strategy.md) |
+| Front end | [Web application (React SPA): pages, configuration, hosting, and verification](docs/frontend/web-app.md) |
 | Product | [Feature roadmap](docs/product/feature-roadmap.md), [MVP definition](docs/product/mvp-definition.md), [product requirements](docs/product/product-requirement.md), [sprint roadmap](docs/product/sprint-roadmap.md) |
 
 These topic documents distinguish implementation from observed verification
@@ -146,6 +147,7 @@ alongside the latest report.
 - [DocIntake.Api](src/DocIntake.Api): ASP.NET Core minimal API.
 - [DocIntake.Extractor](src/DocIntake.Extractor): .NET 8 isolated Azure Function.
 - [DocIntake.Worker](src/DocIntake.Worker): .NET 8 worker service for chunking, embedding, and indexing (Sprint 3).
+- [DocIntake.Web](src/DocIntake.Web): React + Fluent UI single-page application (sign-in, upload, document status, ask), hosted on Azure Static Web Apps; see [web application](docs/frontend/web-app.md).
 - [DocIntake.Tests](tests/DocIntake.Tests): xUnit and FluentAssertions integration tests.
 - [Infrastructure](infra/main.bicep): resource-group-scoped Azure deployment.
 - [SQL migrations](sql/migrations): versioned, checksummed schema and grant scripts applied by [DocIntake.Migrations](src/DocIntake.Migrations) as a Container Apps Job during deployment.

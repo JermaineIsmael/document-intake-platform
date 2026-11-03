@@ -378,8 +378,55 @@ if [[ -z "$extractor_name" ]]; then
   exit 1
 fi
 
+api_fqdn="$(deployment_output "$deployment_name" apiFqdn)"
+web_app_name="$(deployment_output "$deployment_name" webAppName)"
+web_app_hostname="$(deployment_output "$deployment_name" webAppHostname)"
+
+# The front end signs in with the API app registration (its client ID is the API audience), so the
+# Static Web App origin must be one of that registration's single-page-application redirect URIs.
+# Updating it needs ownership of the app registration or an Application Administrator role; without
+# it the pipeline warns and prints the one-time manual step instead of failing the deployment.
+ensure_spa_redirect_uri() {
+  local app_id="$1" redirect_uri="$2" current updated
+  if [[ ! "$app_id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    echo "Warning: authAudience '$app_id' is not an application (client) ID; register '$redirect_uri' as an SPA redirect URI manually." >&2
+    return 0
+  fi
+  if ! current="$(az ad app show --id "$app_id" --query 'spa.redirectUris' -o json 2>/dev/null)"; then
+    echo "Warning: could not read app registration $app_id (needs Microsoft Graph read access)." >&2
+    echo "  Ensure '$redirect_uri' is a Single-page application redirect URI of that registration." >&2
+    return 0
+  fi
+  if python3 -c 'import json, sys; sys.exit(0 if sys.argv[1] in (json.loads(sys.argv[2]) or []) else 1)' \
+    "$redirect_uri" "$current"; then
+    echo "SPA redirect URI '$redirect_uri' is registered on app $app_id."
+    return 0
+  fi
+
+  updated="$(python3 -c 'import json, sys; uris = json.loads(sys.argv[2]) or []; print(json.dumps({"spa": {"redirectUris": uris + [sys.argv[1]]}}))' \
+    "$redirect_uri" "$current")"
+  echo "Adding SPA redirect URI '$redirect_uri' to app registration $app_id..."
+  if ! az rest --method PATCH \
+    --uri "https://graph.microsoft.com/v1.0/applications(appId='${app_id}')" \
+    --headers 'Content-Type=application/json' \
+    --body "$updated" > /dev/null; then
+    echo "Warning: the pipeline identity cannot update app registration $app_id. Sign-in from the front end" >&2
+    echo "  fails until an owner adds '$redirect_uri' under Authentication > Single-page application." >&2
+    return 0
+  fi
+}
+
+if [[ -n "$web_app_hostname" ]]; then
+  ensure_spa_redirect_uri "$(parameter_value authAudience)" "https://${web_app_hostname}/"
+fi
+
 echo "##vso[task.setvariable variable=extractorName]$extractor_name"
 echo "##vso[task.setvariable variable=apiImage]$api_image"
 echo "##vso[task.setvariable variable=workerImage]$worker_image"
 echo "##vso[task.setvariable variable=migrationImage]$migration_image"
+echo "##vso[task.setvariable variable=apiFqdn]$api_fqdn"
+echo "##vso[task.setvariable variable=webAppName]$web_app_name"
 echo "Infrastructure is ready. Extractor Function App: $extractor_name"
+if [[ -n "$web_app_hostname" ]]; then
+  echo "Front end Static Web App: https://${web_app_hostname}/ (content is published by scripts/deploy-web.sh)"
+fi

@@ -19,10 +19,23 @@ steps:
       packageType: sdk
       version: 8.0.x
 
+  - task: UseNode@1
+    displayName: Install Node.js 24 LTS
+    inputs:
+      version: 24.x
+
   - script: |
       dotnet build DocIntake.sln --configuration Release --warnaserror
       dotnet test DocIntake.sln --configuration Release --no-build
     displayName: Build and test solution
+
+  - script: |
+      npm ci --no-audit --no-fund
+      npm run lint -- --deny-warnings
+      npm test
+      npm run build
+    displayName: Lint, test, and build front end
+    workingDirectory: src/DocIntake.Web
 
   - task: AzureCLI@2
     displayName: Provision infrastructure and deploy API and Worker images
@@ -74,3 +87,16 @@ steps:
       WORKER_IMAGE: $(workerImage)
       MIGRATION_IMAGE: $(migrationImage)
       EXTRACTOR_PACKAGE: $(Build.ArtifactStagingDirectory)/extractor.zip
+
+  - task: AzureCLI@2
+    displayName: Build and publish front end to Static Web App
+    inputs:
+      azureSubscription: $(azureServiceConnection)
+      scriptType: bash
+      scriptLocation: scriptPath
+      scriptPath: scripts/deploy-web.sh
+      workingDirectory: $(Build.SourcesDirectory)
+    env:
+      RESOURCE_GROUP: $(resourceGroup)
+      WEB_APP_NAME: $(webAppName)
+      API_FQDN: $(apiFqdn)
